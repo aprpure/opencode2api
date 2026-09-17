@@ -107,6 +107,22 @@ func (g *Gateway) doUpstream(ctx context.Context, route models.Route, bodies map
 	return retryResp, retryRoute, nil
 }
 
+// peekStaleReasoningReference reports whether a 400 response body carries a
+// stale reasoning marker without consuming it: the body is read and then
+// restored so the caller can still forward or retry it.
+func peekStaleReasoningReference(resp *http.Response) bool {
+	if resp == nil || resp.Body == nil {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	httpx.DrainAndClose(resp.Body)
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	if err != nil {
+		return false
+	}
+	return isStaleReasoningReference(body)
+}
+
 // isStaleReasoningReference reports whether an upstream 400 body describes a
 // reasoning item/reference the server no longer recognizes, such as
 // "Referenced reasoning item 'rs_...' was not found or has expired".
@@ -200,9 +216,13 @@ func (g *Gateway) doUpstreamTiers(ctx context.Context, route models.Route, bodie
 	if ctx.Err() != nil {
 		// The anonymous phase already consumed the request budget. Entering the
 		// authenticated tiers here would only fire instant attempts against a
-		// dead context, cooling keys that were never really tried.
+		// dead context, cooling keys that were never really tried. A stale
+		// response must not mask the expired budget either: drain it for
+		// connection reuse and surface an error so the gateway maps an
+		// exhausted budget to 504 instead of 502.
 		if lastResponse != nil {
-			return lastResponse, effectiveRoute, attempts, nil
+			httpx.DrainAndClose(lastResponse.Body)
+			lastResponse = nil
 		}
 		if lastErr == nil {
 			lastErr = ctx.Err()
@@ -288,12 +308,16 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		if ctx.Err() != nil {
 			// The parent budget expired while this attempt was in flight. Its
 			// outcome says nothing about this proxy, so record nothing and stop
-			// scanning.
-			lastResponse, lastErr = resp, err
-			if lastErr == nil && lastResponse == nil {
-				lastErr = ctx.Err()
+			// scanning. The response (if any) is drained for connection reuse,
+			// but the expired budget is surfaced as the error so the gateway
+			// reports 504 instead of replaying a stale response body.
+			if resp != nil {
+				httpx.DrainAndClose(resp.Body)
 			}
-			break
+			if err == nil {
+				err = ctx.Err()
+			}
+			return nil, err, attempts
 		}
 		g.observeAnonymousResult(ctx, node, resp, err)
 		g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, node.proxy, resp, err, duration)
@@ -305,9 +329,21 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		lastErr = err
 		if err != nil {
 			g.logger.Debug("anonymous transport attempt failed", "component", "upstream", "event", "anonymous_attempt_transport_failed", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "duration_ms", duration.Milliseconds(), "error", err)
-		} else {
-			g.logger.Debug("anonymous upstream returned an error response; trying the next proxy", "component", "upstream", "event", "anonymous_attempt_response_failed", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
+			continue
 		}
+		// Request-shape errors are deterministic: retrying the same body
+		// through the remaining proxies returns the same rejection, so stop
+		// scanning and let the caller enter the key tiers or surface the
+		// response. Stale reasoning references are the exception: the outer
+		// doUpstream strips them and replays once, so a 400 whose body
+		// carries that marker keeps scanning instead of short-circuiting.
+		// Peeking consumes the body, therefore it is restored before
+		// continuing so downstream error handling still sees the payload.
+		if isNonRetryableClientResponse(resp, nil) && !peekStaleReasoningReference(resp) {
+			g.logger.Debug("anonymous upstream rejected a non-retryable request", "component", "upstream", "event", "anonymous_attempt_rejected", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
+			break
+		}
+		g.logger.Debug("anonymous upstream returned an error response; trying the next proxy", "component", "upstream", "event", "anonymous_attempt_response_failed", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
 	}
 	if lastResponse != nil {
 		return lastResponse, nil, attempts
@@ -464,11 +500,17 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 			// The request budget expired while this attempt was in flight. A
 			// cancelled context says nothing about the key or the proxy: without
 			// this guard the instant DeadlineExceeded would cool a healthy key
-			// and evict a healthy proxy from the pool.
-			lastResponse, lastErr = resp, err
-			if lastErr == nil && lastResponse == nil {
-				lastErr = ctx.Err()
+			// and evict a healthy proxy from the pool. The in-flight response
+			// is drained for connection reuse, but the expired budget is
+			// surfaced as the error so the gateway reports 504 instead of
+			// replaying a stale response body.
+			if resp != nil {
+				httpx.DrainAndClose(resp.Body)
 			}
+			if err == nil {
+				err = ctx.Err()
+			}
+			lastErr = err
 			break
 		}
 		g.observeKeyResult(ctx, nodes, node, proxy, resp, err)

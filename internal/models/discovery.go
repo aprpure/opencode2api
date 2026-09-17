@@ -12,6 +12,7 @@ import (
 
 	"opencode2api/internal/config"
 	"opencode2api/internal/httpx"
+	"opencode2api/internal/identity"
 	wire "opencode2api/internal/protocol"
 )
 
@@ -260,6 +261,14 @@ func FetchModels(ctx context.Context, client *http.Client, baseURL, key string) 
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("User-Agent", httpx.UserAgent())
 	req.Header.Set("x-opencode-client", "cli")
+	// The anonymous refresh uses the shared "public" credential, which is
+	// subject to the same client fingerprinting as inference: without the
+	// official-shaped session/request/project trio a 403 here empties the
+	// catalog and degrades /healthz. The IDs carry no affinity meaning on
+	// this endpoint; only their shape matters.
+	req.Header.Set("x-opencode-session", identity.StableSessionID("models-refresh"))
+	req.Header.Set("x-opencode-request", identity.NewMessageID())
+	req.Header.Set("x-opencode-project", "global")
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, err
