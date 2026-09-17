@@ -595,20 +595,18 @@ func newUpstreamRequest(ctx context.Context, baseURL string, protocol wire.Proto
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
+	// Byte-identical to the official CLI (HAR: opencode 1.18.31 on Bun).
+	// The free tier fingerprints these: a Go-style UA, prj_/req_ ID shapes,
+	// or extra affinity headers yield 403 "can only be used from within
+	// OpenCode". Only the headers the CLI sends on the Responses path are
+	// set here (plus the auth headers below); the legacy x-session-affinity,
+	// X-Session-Id and x-parent-session-id headers are deliberately omitted.
+	req.Header.Set("Accept", "*/*")
 	req.Header.Set("User-Agent", httpx.UserAgent())
 	req.Header.Set("x-opencode-client", "cli")
 	req.Header.Set("x-opencode-session", ids.Session)
-	// OpenCode 1.18.x sends these correlation headers to preserve provider-side
-	// prompt/session affinity. Keep the legacy x-opencode-session header too so
-	// older Zen deployments continue to recognize the request.
-	req.Header.Set("x-session-affinity", ids.Session)
-	req.Header.Set("X-Session-Id", ids.Session)
 	req.Header.Set("x-opencode-request", ids.Request)
 	req.Header.Set("x-opencode-project", ids.Project)
-	if ids.ParentSession != "" {
-		req.Header.Set("x-parent-session-id", ids.ParentSession)
-	}
 	if protocol == wire.Anthropic {
 		req.Header.Set("x-api-key", key)
 		req.Header.Set("anthropic-version", "2023-06-01")
