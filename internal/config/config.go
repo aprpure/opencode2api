@@ -84,6 +84,11 @@ type PerformanceConfig struct {
 // and only the header wait is bounded: an established stream keeps flowing
 // under the request-level timeout.
 //
+// Default 60s rationale: normal first-token latencies are single-digit
+// seconds (10x headroom), while a hung attempt previously consumed the whole
+// request budget and poisoned every follow-up failover with an expired
+// context. Tailed queueing beyond 60s is possible on congested free tiers —
+// raise this if TTFT p95 approaches the bound (see ttft_p50/p95 in monitor).
 // The bound is installed on the shared transports, so it covers every attempt
 // in both the anonymous and the authenticated loops. Without it, one hung exit
 // can consume the entire request budget by itself, and the attempts that follow
@@ -113,7 +118,7 @@ func Load(path string) (Config, error) {
 		Upstream:    UpstreamConfig{Zen: "https://opencode.ai/zen", Go: "https://opencode.ai/zen/go"},
 		Retry:       RetryConfig{MaxAttempts: 3, TimeoutSeconds: 1800},
 		Models:      ModelsConfig{RefreshSeconds: 300, Protocols: map[string]string{}},
-		Performance: PerformanceConfig{MaxIdleConns: 2048, MaxIdleConnsPerHost: 256, MaxConnsPerHost: 0, IdleConnTimeoutSeconds: 120, ConnectTimeoutSeconds: 3, FailureCooldownSeconds: 15, AttemptTimeoutSeconds: 60},
+		Performance: PerformanceConfig{MaxIdleConns: 2048, MaxIdleConnsPerHost: 256, MaxConnsPerHost: 0, IdleConnTimeoutSeconds: 120, ConnectTimeoutSeconds: 5, FailureCooldownSeconds: 15, AttemptTimeoutSeconds: 60},
 		Logging:     LoggingConfig{Level: "info", RingSize: 2000},
 		WebUI:       WebUIConfig{Listen: "0.0.0.0:8081", SessionTTLMinutes: 720},
 		Prefer:      TierGo,

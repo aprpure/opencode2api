@@ -25,32 +25,22 @@ func readAll(t *testing.T, resp *http.Response) string {
 	return string(data)
 }
 
-// Deterministic 400 must short-circuit: predicate true, and the peek must
-// not consume the body.
-func TestPeekDeterministic400(t *testing.T) {
-	resp := fakeResp(400, `{"error":{"message":"unknown field foo"}}`)
-	if !isNonRetryableClientResponse(resp, nil) {
-		t.Fatal("expected non-retryable")
-	}
-	if peekStaleReasoningReference(resp) {
-		t.Fatal("must not be stale")
-	}
-	if got := readAll(t, resp); !strings.Contains(got, "unknown field") {
-		t.Fatalf("body not restored: %q", got)
-	}
-}
-
-// Stale reasoning 400 must NOT short-circuit.
-func TestPeekStaleReasoning400(t *testing.T) {
-	resp := fakeResp(400, `{"error":{"message":"Referenced reasoning item 'rs_abc' was not found or has expired"}}`)
-	if !isNonRetryableClientResponse(resp, nil) {
-		t.Fatal("expected non-retryable")
-	}
-	if !peekStaleReasoningReference(resp) {
-		t.Fatal("expected stale marker")
-	}
-	if got := readAll(t, resp); !strings.Contains(got, "rs_abc") {
-		t.Fatalf("body not restored: %q", got)
+// Deterministic 400 (including stale-reasoning 400) short-circuits the
+// anonymous scan: the outer doUpstream triggers its strip-and-retry off
+// the final response body's marker, so scanning more proxies only burns
+// round trips for the same rejection.
+func TestDeterministic400ShortCircuits(t *testing.T) {
+	for _, body := range []string{
+		`{"error":{"message":"unknown field foo"}}`,
+		`{"error":{"message":"Referenced reasoning item 'rs_abc' was not found or has expired"}}`,
+	} {
+		resp := fakeResp(400, body)
+		if !isNonRetryableClientResponse(resp, nil) {
+			t.Fatalf("expected non-retryable for %q", body)
+		}
+		if got := readAll(t, resp); !strings.Contains(got, body[len(body)-20:]) {
+			t.Fatalf("body must stay intact for outer retry: %q", got)
+		}
 	}
 }
 

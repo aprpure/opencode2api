@@ -107,22 +107,6 @@ func (g *Gateway) doUpstream(ctx context.Context, route models.Route, bodies map
 	return retryResp, retryRoute, nil
 }
 
-// peekStaleReasoningReference reports whether a 400 response body carries a
-// stale reasoning marker without consuming it: the body is read and then
-// restored so the caller can still forward or retry it.
-func peekStaleReasoningReference(resp *http.Response) bool {
-	if resp == nil || resp.Body == nil {
-		return false
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	httpx.DrainAndClose(resp.Body)
-	resp.Body = io.NopCloser(bytes.NewReader(body))
-	if err != nil {
-		return false
-	}
-	return isStaleReasoningReference(body)
-}
-
 // isStaleReasoningReference reports whether an upstream 400 body describes a
 // reasoning item/reference the server no longer recognizes, such as
 // "Referenced reasoning item 'rs_...' was not found or has expired".
@@ -334,12 +318,11 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		// Request-shape errors are deterministic: retrying the same body
 		// through the remaining proxies returns the same rejection, so stop
 		// scanning and let the caller enter the key tiers or surface the
-		// response. Stale reasoning references are the exception: the outer
-		// doUpstream strips them and replays once, so a 400 whose body
-		// carries that marker keeps scanning instead of short-circuiting.
-		// Peeking consumes the body, therefore it is restored before
-		// continuing so downstream error handling still sees the payload.
-		if isNonRetryableClientResponse(resp, nil) && !peekStaleReasoningReference(resp) {
+		// response. This includes stale-reasoning 400s: the outer doUpstream
+		// triggers its strip-and-retry off the final response body's marker,
+		// which is still intact here, so scanning more proxies would only
+		// burn N-1 round trips for the same rejection.
+		if isNonRetryableClientResponse(resp, nil) {
 			g.logger.Debug("anonymous upstream rejected a non-retryable request", "component", "upstream", "event", "anonymous_attempt_rejected", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
 			break
 		}
