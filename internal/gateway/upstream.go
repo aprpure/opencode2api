@@ -321,8 +321,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		if err == nil && resp.StatusCode/100 == 2 {
 			g.logger.Debug("anonymous upstream accepted request", "component", "upstream", "event", "anonymous_attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
 			if !clientStream && (zenProtocol == wire.Chat || zenProtocol == wire.Responses) {
-				clientSentTools := wire.HasClientTools(body)
-				aggregated, aggErr := g.aggregateAnonymousStream(ctx, route, resp, ids, zenProtocol, clientSentTools)
+				aggregated, aggErr := g.aggregateAnonymousStream(ctx, route, resp, ids, zenProtocol)
 				if aggErr == nil {
 					return aggregated, nil, attempts
 				}
@@ -362,11 +361,10 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 // non-streaming request and repackages it as a single JSON document in the
 // route's own protocol. The upstream response is always drained so the
 // connection can be reused; on success the caller receives a fresh in-memory
-// response with Content-Type application/json. Injected fingerprint tools are
-// filtered out when the client never requested tools.
-func (g *Gateway) aggregateAnonymousStream(ctx context.Context, route models.Route, resp *http.Response, ids identity.RequestIDs, from wire.Protocol, clientSentTools bool) (*http.Response, error) {
+// response with Content-Type application/json.
+func (g *Gateway) aggregateAnonymousStream(ctx context.Context, route models.Route, resp *http.Response, ids identity.RequestIDs, from wire.Protocol) (*http.Response, error) {
 	defer httpx.DrainAndClose(resp.Body)
-	body, usage, reported, err := wire.CollectStreamResponse(io.LimitReader(resp.Body, 64<<20), from, route.Protocol, route.ID, clientSentTools)
+	body, usage, reported, err := wire.CollectStreamResponse(io.LimitReader(resp.Body, 64<<20), from, route.Protocol, route.ID)
 	if err != nil {
 		return nil, err
 	}

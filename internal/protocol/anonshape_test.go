@@ -21,8 +21,8 @@ func TestShapeAnonymousChatBody(t *testing.T) {
 		t.Fatalf("stream_options missing include_usage: %v", payload["stream_options"])
 	}
 	tools, _ := payload["tools"].([]any)
-	if len(tools) != 4 {
-		t.Fatalf("expected 4 quartet tools injected, got %d", len(tools))
+	if len(tools) != 5 {
+		t.Fatalf("expected 5 quartet tools injected, got %d", len(tools))
 	}
 	names := map[string]bool{}
 	for _, raw := range tools {
@@ -47,9 +47,9 @@ func TestShapeAnonymousChatBody(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	keptTools, _ := keptPayload["tools"].([]any)
-	// 1 custom + 1 existing bash + 3 appended (glob, grep, read) = 5
-	if len(keptTools) != 5 {
-		t.Fatalf("expected 5 tools after merge, got %d", len(keptTools))
+	// 1 custom + 1 existing bash + 4 appended (edit, glob, grep, read) = 6
+	if len(keptTools) != 6 {
+		t.Fatalf("expected 6 tools after merge, got %d", len(keptTools))
 	}
 	firstTool, _ := keptTools[0].(map[string]any)
 	fn, _ := firstTool["function"].(map[string]any)
@@ -60,9 +60,6 @@ func TestShapeAnonymousChatBody(t *testing.T) {
 	// HasClientTools checks
 	if HasClientTools([]byte(withTools)) != true {
 		t.Fatal("expected HasClientTools=true for custom_tool")
-	}
-	if HasClientTools(out) != false {
-		t.Fatal("expected HasClientTools=false for only fingerprint tools")
 	}
 
 	// Non-Chat bodies and malformed input pass through untouched.
@@ -95,8 +92,8 @@ func TestShapeAnonymousResponsesBody(t *testing.T) {
 	}
 	// Verify quartet flat tools were injected
 	tools, _ := payload["tools"].([]any)
-	if len(tools) != 4 {
-		t.Fatalf("expected 4 flat tools, got %d", len(tools))
+	if len(tools) != 5 {
+		t.Fatalf("expected 5 flat tools, got %d", len(tools))
 	}
 	first, _ := tools[0].(map[string]any)
 	if first["type"] != "function" || first["name"] != "bash" {
@@ -108,7 +105,7 @@ func TestCollectStreamResponseChat(t *testing.T) {
 	sse := "data: {\"id\":\"gen-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}\n\n" +
 		"data: {\"id\":\"gen-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\n" +
 		"data: [DONE]\n\n"
-	body, usage, reported, err := CollectStreamResponse(strings.NewReader(sse), Chat, Chat, "m", false)
+	body, usage, reported, err := CollectStreamResponse(strings.NewReader(sse), Chat, Chat, "m")
 	if err != nil {
 		t.Fatalf("collect: %v", err)
 	}
@@ -130,35 +127,9 @@ func TestCollectStreamResponseChat(t *testing.T) {
 	}
 }
 
-func TestCollectStreamResponseFiltersInjectedTools(t *testing.T) {
-	// Upstream emits a tool_call chunk for "read"
-	sse := "data: {\"id\":\"gen-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]}}]}\n\n" +
-		"data: {\"id\":\"gen-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\n" +
-		"data: [DONE]\n\n"
-
-	// When clientSentTools is false, the injected "read" tool call must be filtered
-	body, _, _, err := CollectStreamResponse(strings.NewReader(sse), Chat, Chat, "m", false)
-	if err != nil {
-		t.Fatalf("collect: %v", err)
-	}
-	var doc map[string]any
-	if err := json.Unmarshal(body, &doc); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	choices, _ := doc["choices"].([]any)
-	choice, _ := choices[0].(map[string]any)
-	message, _ := choice["message"].(map[string]any)
-	if _, hasTools := message["tool_calls"]; hasTools {
-		t.Fatal("injected tool_calls must be filtered when client sent no tools")
-	}
-	if choice["finish_reason"] != "stop" {
-		t.Fatalf("finish_reason should be normalized to stop, got %v", choice["finish_reason"])
-	}
-}
-
 func TestCollectStreamResponseError(t *testing.T) {
 	sse := "data: {\"error\":{\"message\":\"boom\",\"type\":\"upstream_error\"}}\n\n"
-	if _, _, _, err := CollectStreamResponse(strings.NewReader(sse), Chat, Chat, "m", false); err == nil {
+	if _, _, _, err := CollectStreamResponse(strings.NewReader(sse), Chat, Chat, "m"); err == nil {
 		t.Fatal("expected stream error")
 	}
 }

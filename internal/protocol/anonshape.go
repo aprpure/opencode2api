@@ -9,10 +9,10 @@ import (
 	"opencode2api/internal/jsonutil"
 )
 
-// FingerprintTools is the file-search quartet required by OpenCode free tier:
-// upstream rejects Chat / Responses requests that lack any of these four
+// FingerprintTools is the core agent toolset required by OpenCode free tier:
+// upstream rejects Chat / Responses requests that lack any of these
 // function names with 403 FreeTierError.
-var FingerprintTools = [...]string{"bash", "glob", "grep", "read"}
+var FingerprintTools = [...]string{"bash", "edit", "glob", "grep", "read"}
 
 func isFingerprintTool(name string) bool {
 	for _, tool := range FingerprintTools {
@@ -61,7 +61,7 @@ func injectMissingQuartet(payload map[string]any, protocol Protocol) {
 		if present[name] {
 			continue
 		}
-		desc := "OpenCode built-in " + name + " tool"
+		desc := "Agent tool " + name
 		if protocol == Responses {
 			tools = append(tools, map[string]any{
 				"type":        "function",
@@ -130,7 +130,7 @@ func (discardFlusher) Flush() {}
 // the counterpart of forcing stream:true on the anonymous lane: when the client
 // asked for a plain JSON reply while the upstream only serves SSE, the
 // gateway joins the stream here instead of leaking raw SSE chunks downstream.
-func CollectStreamResponse(reader io.Reader, from, to Protocol, model string, clientSentTools bool) ([]byte, Usage, bool, error) {
+func CollectStreamResponse(reader io.Reader, from, to Protocol, model string) ([]byte, Usage, bool, error) {
 	parser := &bridgeStreamParser{
 		protocol:          from,
 		tools:             map[string]bool{},
@@ -166,13 +166,13 @@ func CollectStreamResponse(reader io.Reader, from, to Protocol, model string, cl
 	})
 	if readErr != nil {
 		if errors.Is(readErr, errStreamNormalTermination) {
-			return finishCollection(emitter, to, clientSentTools)
+			return finishCollection(emitter, to)
 		}
 		return nil, Usage{}, false, readErr
 	}
 	switch termination {
 	case streamNormalTermination:
-		return finishCollection(emitter, to, clientSentTools)
+		return finishCollection(emitter, to)
 	case streamErrorTermination:
 		return nil, Usage{}, false, errStreamUpstreamFailure
 	default:
@@ -180,7 +180,7 @@ func CollectStreamResponse(reader io.Reader, from, to Protocol, model string, cl
 	}
 }
 
-func finishCollection(emitter *bridgeStreamEmitter, target Protocol, clientSentTools bool) ([]byte, Usage, bool, error) {
+func finishCollection(emitter *bridgeStreamEmitter, target Protocol) ([]byte, Usage, bool, error) {
 	response := bridgeResponse{
 		ID:      emitter.id,
 		Model:   emitter.model,
@@ -206,20 +206,12 @@ func finishCollection(emitter *bridgeStreamEmitter, target Protocol, clientSentT
 	}
 	for _, key := range emitter.order {
 		tool := emitter.tools[key]
-		// Injected fingerprint tools carry no client intent; filter them out
-		// when the client never requested tools.
-		if !clientSentTools && isFingerprintTool(tool.Name) {
-			continue
-		}
 		response.Tools = append(response.Tools, bridgeBlock{
 			Kind:          "tool_call",
 			ID:            tool.ID,
 			Name:          tool.Name,
 			ArgumentsJSON: tool.Arguments.String(),
 		})
-	}
-	if len(response.Tools) == 0 && response.Stop == "tool_calls" {
-		response.Stop = "stop"
 	}
 	encoded, err := json.Marshal(encodeBridgeResponse(target, response))
 	if err != nil {
