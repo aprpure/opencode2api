@@ -6,7 +6,7 @@
 // "OpenCode's free tier can only be used from within OpenCode".
 // HAR captures of opencode 1.18.31 show the exact shapes:
 //
-//	User-Agent:         opencode/1.18.31 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14
+//	User-Agent:         opencode/1.18.31 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14
 //	x-opencode-client:  cli
 //	x-opencode-project: global
 //	x-opencode-request: msg_<12 lowercase hex><14 base62>  (e.g. msg_0ad9f52f9001RS5CQes1JobvPt)

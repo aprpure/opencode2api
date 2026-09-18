@@ -6,5 +6,5 @@ package httpx
 // amd64; go1.x)"), returning 403 "OpenCode's free tier can only be used from
 // within OpenCode". Keep this string byte-identical to the CLI.
 func UserAgent() string {
-	return "opencode/1.18.31 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14"
+	return "opencode/1.18.31 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
 }

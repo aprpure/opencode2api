@@ -248,6 +248,12 @@ func (g *Gateway) doUpstreamTiers(ctx context.Context, route models.Route, bodie
 // failure, including an HTTP error response, advances to the next proxy. Only a
 // successful response ends the anonymous phase; exhausting the proxy cursor
 // returns control to the preferred authenticated tiers.
+//
+// The anonymous free tier only accepts the official CLI shape: streaming
+// requests whose tool manifest contains the file-search quartet (bash, glob,
+// grep, read). Other shapes are rejected with 403 FreeTierError, so the body
+// is reshaped before sending and the SSE stream is aggregated back into a
+// single JSON document when the client asked for a non-streaming reply.
 func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, error, int) {
 	var lastResponse *http.Response
 	var lastErr error
@@ -257,6 +263,13 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	body := bodies[config.TierZen]
 	if len(body) == 0 {
 		return nil, errors.New("no prepared Zen request body"), 0
+	}
+	zenProtocol := route.ProtocolFor(config.TierZen)
+	shapedBody := wire.ShapeAnonymousBody(body, zenProtocol)
+	wantStream := wire.IsStreamBody(body)
+	clientStream := wantStream
+	if meta := telemetry.MetaFromContext(ctx); meta != nil && meta.Stream {
+		clientStream = true
 	}
 	for attempts < limit {
 		if ctx.Err() != nil {
@@ -281,7 +294,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 			httpx.DrainAndClose(lastResponse.Body)
 			lastResponse = nil
 		}
-		req, err := newUpstreamRequest(ctx, g.cfg.Upstream.Zen, route.Protocol, body, ids, anonymousZenKey)
+		req, err := newUpstreamRequest(ctx, g.cfg.Upstream.Zen, zenProtocol, shapedBody, ids, anonymousZenKey)
 		if err != nil {
 			return nil, err, attempts
 		}
@@ -307,6 +320,14 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, node.proxy, resp, err, duration)
 		if err == nil && resp.StatusCode/100 == 2 {
 			g.logger.Debug("anonymous upstream accepted request", "component", "upstream", "event", "anonymous_attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
+			if !clientStream && (zenProtocol == wire.Chat || zenProtocol == wire.Responses) {
+				clientSentTools := wire.HasClientTools(body)
+				aggregated, aggErr := g.aggregateAnonymousStream(ctx, route, resp, ids, zenProtocol, clientSentTools)
+				if aggErr == nil {
+					return aggregated, nil, attempts
+				}
+				g.logger.Warn("anonymous stream aggregation failed; falling back to raw stream", "component", "upstream", "event", "anonymous_aggregate_failed", "request_id", ids.Request, "error", aggErr)
+			}
 			return resp, nil, attempts
 		}
 		lastResponse = resp
@@ -335,6 +356,31 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		lastErr = errors.New("no healthy anonymous proxies available")
 	}
 	return nil, lastErr, attempts
+}
+
+// aggregateAnonymousStream consumes the forced SSE stream of an anonymous
+// non-streaming request and repackages it as a single JSON document in the
+// route's own protocol. The upstream response is always drained so the
+// connection can be reused; on success the caller receives a fresh in-memory
+// response with Content-Type application/json. Injected fingerprint tools are
+// filtered out when the client never requested tools.
+func (g *Gateway) aggregateAnonymousStream(ctx context.Context, route models.Route, resp *http.Response, ids identity.RequestIDs, from wire.Protocol, clientSentTools bool) (*http.Response, error) {
+	defer httpx.DrainAndClose(resp.Body)
+	body, usage, reported, err := wire.CollectStreamResponse(io.LimitReader(resp.Body, 64<<20), from, route.Protocol, route.ID, clientSentTools)
+	if err != nil {
+		return nil, err
+	}
+	if meta := telemetry.MetaFromContext(ctx); meta != nil {
+		meta.Usage, meta.UsageReported = usage, reported
+	}
+	aggregated := *resp
+	aggregated.Body = io.NopCloser(bytes.NewReader(body))
+	aggregated.ContentLength = int64(len(body))
+	aggregated.Header = resp.Header.Clone()
+	aggregated.Header.Set("Content-Type", "application/json")
+	aggregated.Header.Del("Transfer-Encoding")
+	g.logger.Debug("anonymous stream aggregated to a single response", "component", "upstream", "event", "anonymous_aggregated", "request_id", ids.Request, "bytes", len(body))
+	return &aggregated, nil
 }
 
 // requestBodyDumpLimit caps how much of an outbound body is written to the log.
