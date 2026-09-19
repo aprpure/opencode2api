@@ -344,6 +344,9 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol) []byte {
 		payload["stream"] = true
 		changed = true
 	}
+	if ensureAnonymousChatUsage(payload, protocol) {
+		changed = true
+	}
 	if ensureAnonymousTools(payload, protocol) {
 		changed = true
 	}
@@ -355,6 +358,26 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol) []byte {
 		return body
 	}
 	return encoded
+}
+
+// ensureAnonymousChatUsage keeps token usage available when a non-streaming
+// request is forced onto the Chat SSE path. OpenAI-compatible Chat streams
+// require stream_options.include_usage for the final usage event.
+func ensureAnonymousChatUsage(payload map[string]any, protocol wire.Protocol) bool {
+	if protocol != wire.Chat {
+		return false
+	}
+	options, ok := payload["stream_options"].(map[string]any)
+	if !ok {
+		payload["stream_options"] = map[string]any{"include_usage": true}
+		return true
+	}
+	includeUsage, ok := options["include_usage"].(bool)
+	if ok && includeUsage {
+		return false
+	}
+	options["include_usage"] = true
+	return true
 }
 
 // ensureAnonymousTools appends minimal definitions for any missing core
@@ -500,7 +523,20 @@ func (g *Gateway) dumpOutboundBodies(route models.Route, bodies map[config.Tier]
 	}
 }
 
-// doSelectedKeyUpstream sends exactly one attempt through the operator-selected
+// shapeKeyBody normalizes key-tier free-model wire bodies to agent shape
+// (stream + core tools), mirroring the anonymous lane. Upstream now
+// rejects non-agent-shaped free-tier requests on every lane with 403
+// FreeTierError; paid models keep their original bodies. It reports
+// whether the body changed so the gateway can collapse the SSE stream a
+// non-streaming client receives back.
+func (g *Gateway) shapeKeyBody(body []byte, route models.Route, tier config.Tier) ([]byte, bool) {
+	if !g.catalog.IsFreeModel(route.ID) {
+		return body, false
+	}
+	shaped := prepareAnonymousBody(body, route.ProtocolFor(tier))
+	return shaped, !bytes.Equal(shaped, body)
+}
+
 // key. It performs no failover at all — no anonymous lane, no other key and no
 // other tier — so the outcome describes that one key. It also leaves pool state
 // untouched on purpose: a diagnostic request must never cool a production key or
@@ -520,6 +556,12 @@ func (g *Gateway) doSelectedKeyUpstream(ctx context.Context, route models.Route,
 	body := bodies[override.Tier]
 	if len(body) == 0 {
 		return nil, fmt.Errorf("no prepared %s request body", override.Tier), 0
+	}
+	if shaped, changed := g.shapeKeyBody(body, route, override.Tier); changed {
+		body = shaped
+		if meta := telemetry.MetaFromContext(ctx); meta != nil {
+			meta.Shaped = true
+		}
 	}
 	proxy := nodes.Proxy(node)
 	if proxy == nil {
@@ -562,6 +604,12 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 	body := bodies[route.Tier]
 	if len(body) == 0 {
 		return nil, fmt.Errorf("no prepared %s request body", route.Tier), 0
+	}
+	if shaped, changed := g.shapeKeyBody(body, route, route.Tier); changed {
+		body = shaped
+		if meta := telemetry.MetaFromContext(ctx); meta != nil {
+			meta.Shaped = true
+		}
 	}
 	for attempts < g.cfg.Retry.MaxAttempts {
 		if ctx.Err() != nil {
