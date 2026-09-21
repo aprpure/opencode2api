@@ -36,9 +36,12 @@
     "enabled": true,
     "listen": "0.0.0.0:8081",
     "username": "admin",
-    "password_hash": "$argon2id$v=19$m=65536,t=3,p=2$ogomnqeWe2qgf/CdcRNHdw$ZPR9Pfv2uVCJXa6SRr1PqNINZGtkmKk68uXL7quJFNk",
+    "password": "change-this-admin-password",
     "session_ttl_minutes": 720
   },
   "prefer": "go",
-  "reasoning": {}
+  "reasoning": {
+    "effort": "high",
+    "effort_by_model": {}
+  }
 }
