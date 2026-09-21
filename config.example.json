@@ -1,12 +1,17 @@
 {
   "listen": "127.0.0.1:8080",
-  "server_keys": ["change-this-local-key"],
-  "zen_keys": ["sk-your-zen-key"],
+  "server_keys": [
+    "change-this-local-key"
+  ],
+  "zen_keys": [
+    "sk-your-zen-key"
+  ],
   "go_keys": [],
   "anonymous": false,
-  "prefer": "go",
+  "proxies": [
+    "direct"
+  ],
   "proxyfile": "",
-  "proxies": ["direct"],
   "upstream": {
     "zen": "https://opencode.ai/zen",
     "go": "https://opencode.ai/zen/go"
@@ -37,7 +42,9 @@
     "enabled": true,
     "listen": "0.0.0.0:8081",
     "username": "admin",
-    "password": "change-this-admin-password",
+    "password_hash": "$argon2id$v=19$m=65536,t=3,p=2$ogomnqeWe2qgf/CdcRNHdw$ZPR9Pfv2uVCJXa6SRr1PqNINZGtkmKk68uXL7quJFNk",
     "session_ttl_minutes": 720
-  }
+  },
+  "prefer": "go",
+  "reasoning": {}
 }
