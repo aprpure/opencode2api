@@ -218,21 +218,21 @@ Key 初始化时均衡分配到代理。真实流量可以触发代理检查、K
 
 ### Key、监听地址与路由
 
-| 字段                     | 默认值或要求                              |
-| ------------------------ | ----------------------------------------- |
-| `listen`                 | `127.0.0.1:8080`。                        |
-| `server_keys`            | 至少一个本地 Key。                        |
-| `zen_keys`、`go_keys`    | 未启用匿名模式时，至少需要一个上游 Key。  |
-| `anonymous`              | `false`。                                 |
-| `prefer`                 | `go`；可选 `go`、`zen`。                  |
-| `upstream.zen`           | `https://opencode.ai/zen`。               |
-| `upstream.go`            | `https://opencode.ai/zen/go`。            |
-| `proxies`                | 两个代理来源都为空时，使用 `["direct"]`。 |
-| `proxyfile`              | 可选；相对路径基于配置文件所在目录解析。  |
-| `models.refresh_seconds` | `300`；最小为 1。                         |
-| `models.protocols`       | `{}`；按模型 ID 覆盖原生协议。            |
-| `reasoning.effort`       | 空（关闭）；可选 `minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`none`。 |
-| `reasoning.effort_by_model` | `{}`；按模型 ID 覆盖 `reasoning.effort`。 |
+| 字段                        | 默认值或要求                                                                  |
+| --------------------------- | ----------------------------------------------------------------------------- |
+| `listen`                    | `127.0.0.1:8080`。                                                            |
+| `server_keys`               | 至少一个本地 Key。                                                            |
+| `zen_keys`、`go_keys`       | 未启用匿名模式时，至少需要一个上游 Key。                                      |
+| `anonymous`                 | `false`。                                                                     |
+| `prefer`                    | `go`；可选 `go`、`zen`。                                                      |
+| `upstream.zen`              | `https://opencode.ai/zen`。                                                   |
+| `upstream.go`               | `https://opencode.ai/zen/go`。                                                |
+| `proxies`                   | 两个代理来源都为空时，使用 `["direct"]`。                                     |
+| `proxyfile`                 | 可选；相对路径基于配置文件所在目录解析。                                      |
+| `models.refresh_seconds`    | `300`；最小为 1。                                                             |
+| `models.protocols`          | `{}`；按模型 ID 覆盖原生协议。                                                |
+| `reasoning.effort`          | 空（关闭）；可选 `minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`none`。 |
+| `reasoning.effort_by_model` | `{}`；按模型 ID 覆盖 `reasoning.effort`。                                     |
 
 ### 强制思考强度
 

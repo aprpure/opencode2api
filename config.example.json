@@ -1,16 +1,10 @@
 {
   "listen": "127.0.0.1:8080",
-  "server_keys": [
-    "change-this-local-key"
-  ],
-  "zen_keys": [
-    "sk-your-zen-key"
-  ],
+  "server_keys": ["change-this-local-key"],
+  "zen_keys": ["sk-your-zen-key"],
   "go_keys": [],
   "anonymous": false,
-  "proxies": [
-    "direct"
-  ],
+  "proxies": ["direct"],
   "proxyfile": "",
   "upstream": {
     "zen": "https://opencode.ai/zen",
