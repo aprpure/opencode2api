@@ -250,8 +250,8 @@ func (g *Gateway) doUpstreamTiers(ctx context.Context, route models.Route, bodie
 // returns control to the preferred authenticated tiers.
 //
 // The anonymous free tier only accepts the official CLI shape: streaming
-// requests whose tool manifest contains the file-search quartet (bash, glob,
-// grep, read). Other shapes are rejected with 403 FreeTierError, so the body
+// requests whose tool manifest contains the core agent tools (bash, edit,
+// glob, grep, read). Other shapes are rejected with 403 FreeTierError, so the body
 // is reshaped before sending and the SSE stream is aggregated back into a
 // single JSON document when the client asked for a non-streaming reply.
 func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, error, int) {
@@ -320,12 +320,12 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, node.proxy, resp, err, duration)
 		if err == nil && resp.StatusCode/100 == 2 {
 			g.logger.Debug("anonymous upstream accepted request", "component", "upstream", "event", "anonymous_attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
-			if !clientStream && (zenProtocol == wire.Chat || zenProtocol == wire.Responses) {
-				aggregated, aggErr := g.aggregateAnonymousStream(ctx, route, resp, ids, zenProtocol)
+			if !clientStream && (zenProtocol == wire.Chat || zenProtocol == wire.Responses || zenProtocol == wire.Anthropic) {
+				aggregated, aggErr := g.aggregateShapedStream(ctx, route, resp, ids, zenProtocol)
 				if aggErr == nil {
 					return aggregated, nil, attempts
 				}
-				g.logger.Warn("anonymous stream aggregation failed; falling back to raw stream", "component", "upstream", "event", "anonymous_aggregate_failed", "request_id", ids.Request, "error", aggErr)
+				g.logger.Warn("shaped stream aggregation failed; falling back to raw stream", "component", "upstream", "event", "shaped_aggregate_failed", "request_id", ids.Request, "error", aggErr)
 			}
 			return resp, nil, attempts
 		}
@@ -357,12 +357,13 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	return nil, lastErr, attempts
 }
 
-// aggregateAnonymousStream consumes the forced SSE stream of an anonymous
-// non-streaming request and repackages it as a single JSON document in the
-// route's own protocol. The upstream response is always drained so the
-// connection can be reused; on success the caller receives a fresh in-memory
-// response with Content-Type application/json.
-func (g *Gateway) aggregateAnonymousStream(ctx context.Context, route models.Route, resp *http.Response, ids identity.RequestIDs, from wire.Protocol) (*http.Response, error) {
+// aggregateShapedStream consumes the forced SSE stream of a shaped
+// non-streaming request (anonymous lane or key-tier free model) and repackages
+// it as a single JSON document in the route's own protocol. The upstream
+// response is always drained so the connection can be reused; on success the
+// caller receives a fresh in-memory response with Content-Type
+// application/json.
+func (g *Gateway) aggregateShapedStream(ctx context.Context, route models.Route, resp *http.Response, ids identity.RequestIDs, from wire.Protocol) (*http.Response, error) {
 	defer httpx.DrainAndClose(resp.Body)
 	body, usage, reported, err := wire.CollectStreamResponse(io.LimitReader(resp.Body, 64<<20), from, route.Protocol, route.ID)
 	if err != nil {
@@ -377,7 +378,7 @@ func (g *Gateway) aggregateAnonymousStream(ctx context.Context, route models.Rou
 	aggregated.Header = resp.Header.Clone()
 	aggregated.Header.Set("Content-Type", "application/json")
 	aggregated.Header.Del("Transfer-Encoding")
-	g.logger.Debug("anonymous stream aggregated to a single response", "component", "upstream", "event", "anonymous_aggregated", "request_id", ids.Request, "bytes", len(body))
+	g.logger.Debug("shaped stream aggregated to a single response", "component", "upstream", "event", "shaped_aggregated", "request_id", ids.Request, "bytes", len(body))
 	return &aggregated, nil
 }
 
@@ -422,6 +423,20 @@ func (g *Gateway) dumpOutboundBodies(route models.Route, bodies map[config.Tier]
 	}
 }
 
+// shapeKeyBody normalizes key-tier free-model wire bodies to agent shape
+// (stream + core tools), mirroring the anonymous lane. Upstream now
+// rejects non-agent-shaped free-tier requests on every lane with 403
+// FreeTierError; paid models keep their original bodies. It reports
+// whether the body changed so the gateway can collapse the SSE stream a
+// non-streaming client receives back.
+func (g *Gateway) shapeKeyBody(body []byte, route models.Route, tier config.Tier) ([]byte, bool) {
+	if !g.catalog.IsFreeModel(route.ID) {
+		return body, false
+	}
+	shaped := wire.ShapeAnonymousBody(body, route.ProtocolFor(tier))
+	return shaped, !bytes.Equal(shaped, body)
+}
+
 // doSelectedKeyUpstream sends exactly one attempt through the operator-selected
 // key. It performs no failover at all — no anonymous lane, no other key and no
 // other tier — so the outcome describes that one key. It also leaves pool state
@@ -443,6 +458,15 @@ func (g *Gateway) doSelectedKeyUpstream(ctx context.Context, route models.Route,
 	if len(body) == 0 {
 		return nil, fmt.Errorf("no prepared %s request body", override.Tier), 0
 	}
+	keyProtocol := route.ProtocolFor(override.Tier)
+	shaped := false
+	if shapedBody, changed := g.shapeKeyBody(body, route, override.Tier); changed {
+		body = shapedBody
+		shaped = true
+		if meta := telemetry.MetaFromContext(ctx); meta != nil {
+			meta.Shaped = true
+		}
+	}
 	proxy := nodes.Proxy(node)
 	if proxy == nil {
 		return nil, errors.New("selected upstream key has no proxy binding"), 0
@@ -453,7 +477,7 @@ func (g *Gateway) doSelectedKeyUpstream(ctx context.Context, route models.Route,
 	}
 	keyID := config.KeyDisplayID(node.key)
 	setRequestCredential(ctx, override.Tier, keyID, "key", false, proxy)
-	req, err := newUpstreamRequest(ctx, baseURL, route.ProtocolFor(override.Tier), body, ids, node.key)
+	req, err := newUpstreamRequest(ctx, baseURL, keyProtocol, body, ids, node.key)
 	if err != nil {
 		return nil, err, 0
 	}
@@ -463,6 +487,16 @@ func (g *Gateway) doSelectedKeyUpstream(ctx context.Context, route models.Route,
 	g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+1, keyID, "key", false, proxy, resp, err, duration)
 	if err != nil {
 		return nil, err, 1
+	}
+	// Diagnostic requests are always non-streaming (the Playground forces
+	// stream:false), so a shaped body needs the same collapse as the
+	// production key lane; otherwise the operator sees raw SSE text.
+	if shaped && resp.StatusCode/100 == 2 && (keyProtocol == wire.Chat || keyProtocol == wire.Responses || keyProtocol == wire.Anthropic) {
+		if aggregated, aggErr := g.aggregateShapedStream(ctx, route, resp, ids, keyProtocol); aggErr == nil {
+			return aggregated, nil, 1
+		} else {
+			g.logger.Warn("shaped stream aggregation failed; falling back to raw stream", "component", "upstream", "event", "shaped_aggregate_failed", "request_id", ids.Request, "error", aggErr)
+		}
 	}
 	return resp, nil, 1
 }
@@ -484,6 +518,20 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 	body := bodies[route.Tier]
 	if len(body) == 0 {
 		return nil, fmt.Errorf("no prepared %s request body", route.Tier), 0
+	}
+	keyProtocol := route.ProtocolFor(route.Tier)
+	shaped := false
+	if shapedBody, changed := g.shapeKeyBody(body, route, route.Tier); changed {
+		body = shapedBody
+		shaped = true
+		if meta := telemetry.MetaFromContext(ctx); meta != nil {
+			meta.Shaped = true
+		}
+	}
+	wantStream := wire.IsStreamBody(bodies[route.Tier])
+	clientStream := wantStream
+	if meta := telemetry.MetaFromContext(ctx); meta != nil && meta.Stream {
+		clientStream = true
 	}
 	for attempts < g.cfg.Retry.MaxAttempts {
 		if ctx.Err() != nil {
@@ -544,6 +592,13 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 		g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, keyID, "key", false, proxy, resp, err, attemptDuration)
 		if err == nil && resp.StatusCode/100 == 2 {
 			g.logger.Debug("upstream accepted request", "component", "upstream", "event", "attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", route.Tier, "key_id", keyID, "proxy", config.RedactURL(proxy.name), "status", resp.StatusCode, "duration_ms", attemptDuration.Milliseconds())
+			if shaped && !clientStream && (keyProtocol == wire.Chat || keyProtocol == wire.Responses || keyProtocol == wire.Anthropic) {
+				aggregated, aggErr := g.aggregateShapedStream(ctx, route, resp, ids, keyProtocol)
+				if aggErr == nil {
+					return aggregated, nil, attempts
+				}
+				g.logger.Warn("shaped stream aggregation failed; falling back to raw stream", "component", "upstream", "event", "shaped_aggregate_failed", "request_id", ids.Request, "error", aggErr)
+			}
 			return resp, nil, attempts
 		}
 		// Request-shape errors are deterministic and must leave this tier without

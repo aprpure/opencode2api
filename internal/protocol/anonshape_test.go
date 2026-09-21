@@ -7,7 +7,7 @@ import (
 )
 
 func TestShapeAnonymousChatBody(t *testing.T) {
-	// Minimal client body gains stream:true, usage options and the quartet tools.
+	// Minimal client body gains stream:true, usage options and the fingerprint tools.
 	out := ShapeAnonymousBody([]byte(`{"model":"m","messages":[],"stream":false}`), Chat)
 	var payload map[string]any
 	if err := json.Unmarshal(out, &payload); err != nil {
@@ -22,7 +22,7 @@ func TestShapeAnonymousChatBody(t *testing.T) {
 	}
 	tools, _ := payload["tools"].([]any)
 	if len(tools) != 5 {
-		t.Fatalf("expected 5 quartet tools injected, got %d", len(tools))
+		t.Fatalf("expected 5 fingerprint tools injected, got %d", len(tools))
 	}
 	names := map[string]bool{}
 	for _, raw := range tools {
@@ -39,7 +39,7 @@ func TestShapeAnonymousChatBody(t *testing.T) {
 		t.Fatal("IsStreamBody must be true after shaping")
 	}
 
-	// Client tools are preserved, only missing quartet tools are appended.
+	// Client tools are preserved, only missing fingerprint tools are appended.
 	withTools := `{"model":"m","messages":[],"stream":true,"tools":[{"type":"function","function":{"name":"custom_tool","description":"c","parameters":{"type":"object"}}},{"type":"function","function":{"name":"bash","description":"b","parameters":{"type":"object"}}}]}`
 	kept := ShapeAnonymousBody([]byte(withTools), Chat)
 	var keptPayload map[string]any
@@ -62,10 +62,27 @@ func TestShapeAnonymousChatBody(t *testing.T) {
 		t.Fatal("expected HasClientTools=true for custom_tool")
 	}
 
-	// Non-Chat bodies and malformed input pass through untouched.
+	// Anthropic bodies are shaped with native tool shape; malformed input passes
+	// through untouched.
 	anthropic := `{"model":"m","max_tokens":8,"messages":[]}`
-	if got := ShapeAnonymousBody([]byte(anthropic), Anthropic); string(got) != anthropic {
-		t.Fatalf("anthropic body must pass through: %q", got)
+	outAnthropic := ShapeAnonymousBody([]byte(anthropic), Anthropic)
+	var anthropicPayload map[string]any
+	if err := json.Unmarshal(outAnthropic, &anthropicPayload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if anthropicPayload["stream"] != true {
+		t.Fatalf("anthropic stream not forced: %v", anthropicPayload["stream"])
+	}
+	anthropicTools, _ := anthropicPayload["tools"].([]any)
+	if len(anthropicTools) != 5 {
+		t.Fatalf("expected 5 native tools, got %d", len(anthropicTools))
+	}
+	firstAnthropic, _ := anthropicTools[0].(map[string]any)
+	if firstAnthropic["name"] != "bash" {
+		t.Fatalf("expected native Anthropic tool shape, got %+v", firstAnthropic)
+	}
+	if _, ok := firstAnthropic["input_schema"]; !ok {
+		t.Fatalf("expected input_schema in Anthropic tool, got %+v", firstAnthropic)
 	}
 	if got := ShapeAnonymousBody([]byte("{bad"), Chat); string(got) != "{bad" {
 		t.Fatalf("malformed body must pass through: %q", got)
@@ -90,7 +107,7 @@ func TestShapeAnonymousResponsesBody(t *testing.T) {
 	if payload["stream"] != true {
 		t.Fatal("expected stream: true")
 	}
-	// Verify quartet flat tools were injected
+	// Verify fingerprint flat tools were injected
 	tools, _ := payload["tools"].([]any)
 	if len(tools) != 5 {
 		t.Fatalf("expected 5 flat tools, got %d", len(tools))
