@@ -141,6 +141,15 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			meta.Tier = string(route.Tier)
 			meta.Protocol = route.Protocol
 		}
+		// A System One model has no message-shaped equivalent, so a decision
+		// payload submitted on a message endpoint is relayed verbatim instead of
+		// being converted. This keeps the model reachable for clients that can
+		// only address /v1/chat/completions or /v1/responses — for example a
+		// gateway whose OpenAI platform pins every request to Responses.
+		if route.Protocol == wire.SystemOne {
+			g.forwardSystemOne(w, r, body, payload, model, route)
+			return
+		}
 		bodies, err := g.prepareRouteBodies(external, route, payload)
 		if err != nil {
 			wire.WriteError(w, external, http.StatusBadRequest, err.Error(), "invalid_request_error", "")
@@ -249,12 +258,10 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 	}
 }
 
-// handleSystemOne forwards System One decision requests verbatim. The payload
-// pairs a free-form state with typed questions, which no message-shaped
-// upstream protocol accepts, so it is never translated: the body is relayed to
-// the upstream systemone endpoint and the typed answer document is returned
-// unchanged. System One answers are non-streaming today; a streaming upstream
-// reply is still relayed verbatim should that change.
+// handleSystemOne serves System One decision requests on their own endpoint.
+// Only models whose upstream protocol is System One can be served here; a chat
+// or responses model belongs on its own endpoint, where the bridge can convert
+// it.
 func (g *Gateway) handleSystemOne(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
 	if err != nil {
@@ -267,8 +274,7 @@ func (g *Gateway) handleSystemOne(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	model := jsonutil.StringAt(payload, "model")
-	meta := telemetry.MetaFromRequest(r)
-	if meta != nil {
+	if meta := telemetry.MetaFromRequest(r); meta != nil {
 		meta.Model = model
 	}
 	if model == "" {
@@ -284,15 +290,22 @@ func (g *Gateway) handleSystemOne(w http.ResponseWriter, r *http.Request) {
 		wire.WriteError(w, wire.SystemOne, http.StatusBadRequest, err.Error(), "invalid_request_error", "model")
 		return
 	}
-	// System One has no translation layer, so only models whose upstream
-	// protocol is systemone can be served from this endpoint. A chat or
-	// responses model belongs on its own endpoint, where the bridge can convert
-	// it; forwarding it here would send a decision payload to a message API.
 	if route.Protocol != wire.SystemOne {
 		wire.WriteError(w, wire.SystemOne, http.StatusBadRequest, fmt.Sprintf("the model does not use the %s protocol", wire.SystemOne), "invalid_request_error", "model")
 		return
 	}
+	g.forwardSystemOne(w, r, body, payload, model, route)
+}
+
+// forwardSystemOne relays a System One decision payload verbatim to the
+// upstream systemone endpoint and returns the typed answer document unchanged.
+// The payload pairs a free-form state with typed questions, which no
+// message-shaped upstream protocol accepts, so it is never translated. Answers
+// are non-streaming today; a streaming upstream reply is still relayed.
+func (g *Gateway) forwardSystemOne(w http.ResponseWriter, r *http.Request, body []byte, payload map[string]any, model string, route models.Route) {
+	meta := telemetry.MetaFromRequest(r)
 	if meta != nil {
+		meta.Model = model
 		meta.Tier = string(route.Tier)
 		meta.Protocol = route.Protocol
 	}
