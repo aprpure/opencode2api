@@ -38,11 +38,6 @@ type Config struct {
 	effectiveProxies []string
 }
 
-type UpstreamConfig struct {
-	Zen string `json:"zen"`
-	Go  string `json:"go"`
-}
-
 // ReasoningConfig forces a thinking level for requests that do not state one.
 //
 // Effort is the default for every model; EffortByModel overrides it for the
@@ -55,6 +50,11 @@ type ReasoningConfig struct {
 	// never set, matching how the rest of the optional surface is persisted.
 	Effort        string            `json:"effort,omitempty"`
 	EffortByModel map[string]string `json:"effort_by_model,omitempty"`
+}
+
+type UpstreamConfig struct {
+	Zen string `json:"zen"`
+	Go  string `json:"go"`
 }
 
 type RetryConfig struct {

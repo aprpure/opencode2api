@@ -7,6 +7,10 @@ import (
 	"testing"
 )
 
+type nopFlusher struct{}
+
+func (nopFlusher) Flush() {}
+
 func chatFinishOf(t *testing.T, doc []byte) string {
 	t.Helper()
 	var payload map[string]any
@@ -61,7 +65,7 @@ func TestCollectStreamResponseDemotesPhantomToolStop(t *testing.T) {
 	sse := "data: {\"id\":\"gen-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}\n\n" +
 		"data: {\"id\":\"gen-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n" +
 		"data: [DONE]\n\n"
-	body, _, _, err := CollectStreamResponse(strings.NewReader(sse), Chat, Chat, "m")
+	body, err := CollapseStream(strings.NewReader(sse), Chat, "m")
 	if err != nil {
 		t.Fatalf("collect: %v", err)
 	}
@@ -75,7 +79,7 @@ func TestCollectStreamResponseDemotesPhantomToolStop(t *testing.T) {
 // start downstream, so emitting them only confuses strict clients.
 func TestResponsesFinishDropsNamelessTool(t *testing.T) {
 	var buf bytes.Buffer
-	emitter := newBridgeStreamEmitter(&buf, discardFlusher{}, Responses, "m")
+	emitter := newBridgeStreamEmitter(&buf, nopFlusher{}, Responses, "m")
 	if err := emitter.Emit(bridgeStreamEvent{Kind: "text", Text: "hi"}); err != nil {
 		t.Fatalf("emit text: %v", err)
 	}

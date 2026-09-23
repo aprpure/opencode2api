@@ -388,22 +388,6 @@ func canonicalAnthropicStop(stop string) string {
 	}
 }
 
-func canonicalResponsesIncomplete(reason string) string {
-	switch reason {
-	case "content_filter":
-		return "content_filter"
-	default:
-		return "length"
-	}
-}
-
-func responsesIncompleteReason(stop string) string {
-	if stop == "content_filter" {
-		return "content_filter"
-	}
-	return "max_output_tokens"
-}
-
 // isToolStop reports whether a canonical bridge stop reason promises tool
 // calls downstream.
 func isToolStop(stop string) bool {
@@ -418,12 +402,11 @@ func isToolStop(stop string) bool {
 // usableToolBlocks drops phantom tool blocks that cannot be executed by a
 // downstream client. Empty arguments are valid, so the tool name is the
 // minimum required signal here; the streaming emitter uses the same rule.
-// The input slice is never mutated: filtering writes into a fresh slice.
 func usableToolBlocks(tools []bridgeBlock) []bridgeBlock {
 	if len(tools) == 0 {
 		return nil
 	}
-	usable := make([]bridgeBlock, 0, len(tools))
+	usable := tools[:0]
 	for _, tool := range tools {
 		if strings.TrimSpace(tool.Name) == "" {
 			continue
@@ -431,6 +414,22 @@ func usableToolBlocks(tools []bridgeBlock) []bridgeBlock {
 		usable = append(usable, tool)
 	}
 	return usable
+}
+
+func canonicalResponsesIncomplete(reason string) string {
+	switch reason {
+	case "content_filter":
+		return "content_filter"
+	default:
+		return "length"
+	}
+}
+
+func responsesIncompleteReason(stop string) string {
+	if stop == "content_filter" {
+		return "content_filter"
+	}
+	return "max_output_tokens"
 }
 
 func responseTextBlocks(blocks []bridgeBlock, protocol string) (string, error) {

@@ -200,6 +200,18 @@ func (emitter *bridgeStreamEmitter) tool(key string) *bridgeStreamTool {
 	return tool
 }
 
+// anyToolStarted reports whether at least one tool block was actually opened
+// downstream. Tools stuck without a name never start; their stop promise must
+// not be advertised as a tool stop.
+func (emitter *bridgeStreamEmitter) anyToolStarted() bool {
+	for _, key := range emitter.order {
+		if tool := emitter.tools[key]; tool != nil && tool.Started {
+			return true
+		}
+	}
+	return false
+}
+
 func (emitter *bridgeStreamEmitter) start() error {
 	if emitter.started {
 		return nil
@@ -455,18 +467,6 @@ func (emitter *bridgeStreamEmitter) emitPendingToolArguments(tool *bridgeStreamT
 	delta := arguments[tool.EmittedArguments:]
 	tool.EmittedArguments = len(arguments)
 	return emitter.emitToolDelta(tool, delta)
-}
-
-// anyToolStarted reports whether at least one tool block was actually opened
-// downstream. Tools stuck without a name never start; their stop promise must
-// not be advertised as a tool stop.
-func (emitter *bridgeStreamEmitter) anyToolStarted() bool {
-	for _, key := range emitter.order {
-		if tool := emitter.tools[key]; tool != nil && tool.Started {
-			return true
-		}
-	}
-	return false
 }
 
 func (emitter *bridgeStreamEmitter) Finish() error {

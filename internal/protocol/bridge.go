@@ -380,8 +380,8 @@ func budgetForEffort(value any) int {
 // reasoning level. The rungs are ordered and pairwise distinct so that a
 // budget a client chose deliberately stays distinguishable: before this,
 // everything at or above 8192 collapsed to "high" and the ladder had no rung
-// above it, so 32000 and 8192 were indistinguishable and an Anthropic ->
-// Chat -> Anthropic round trip rewrote 32000 into 8192.
+// above it, so 32000 and 8192 were indistinguishable and an Anthropic -> Chat
+// -> Anthropic round trip rewrote 32000 into 8192.
 //
 // A missing budget keeps the historical "high": thinking:{type:"adaptive"}
 // with no budget_tokens is the common shape, and it must not silently change
