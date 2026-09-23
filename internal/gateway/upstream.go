@@ -74,7 +74,27 @@ func (g *Gateway) doUpstream(ctx context.Context, route models.Route, bodies map
 	// payload when no retry happens below.
 	resp.Body = io.NopCloser(bytes.NewReader(errBody))
 	if !isStaleReasoningReference(errBody) {
-		return resp, effectiveRoute, nil
+		if !isUnsupportedReasoningEffort(errBody) {
+			return resp, effectiveRoute, nil
+		}
+		fellBack, changed := dropReasoningControls(effectiveRoute, bodies)
+		if !changed {
+			return resp, effectiveRoute, nil
+		}
+		g.logger.Info("retrying upstream without reasoning effort", "component", "upstream", "event", "reasoning_effort_drop_retry", "request_id", ids.Request, "model", route.ID, "tier", effectiveRoute.Tier, "attempt_offset", attempts)
+		retryResp, retryRoute, _, retryErr := g.doUpstreamTiers(ctx, effectiveRoute, fellBack, ids, attempts)
+		if retryErr != nil || retryResp == nil || retryResp.StatusCode/100 != 2 {
+			retryStatus := 0
+			if retryResp != nil {
+				retryStatus = retryResp.StatusCode
+				httpx.DrainAndClose(retryResp.Body)
+			}
+			g.logger.Warn("reasoning effort drop retry failed; returning original error", "component", "upstream", "event", "reasoning_effort_drop_failed", "request_id", ids.Request, "model", route.ID, "tier", effectiveRoute.Tier, "error", retryErr, "retry_status", retryStatus)
+			fallback := *resp
+			fallback.Body = io.NopCloser(bytes.NewReader(errBody))
+			return &fallback, effectiveRoute, nil
+		}
+		return retryResp, retryRoute, nil
 	}
 	stripped, changed := stripStaleReasoningInputs(effectiveRoute, bodies)
 	if !changed {
@@ -124,6 +144,70 @@ func isStaleReasoningReference(body []byte) bool {
 		}
 	}
 	return false
+}
+
+// isUnsupportedReasoningEffort reports whether an upstream 400 blames the
+// request's reasoning configuration. Providers answer an effort level they do
+// not implement (for example "max" on a Responses-native model whose ladder
+// stops at "xhigh") with a generic parameter-validation error that does not
+// name the offending field, so the signature alone is deliberately broad; the
+// caller only replays when the prepared body actually carries reasoning
+// controls, which keeps unrelated 400s untouched.
+func isUnsupportedReasoningEffort(body []byte) bool {
+	text := strings.ToLower(string(body))
+	if strings.Contains(text, "reasoning item") || strings.Contains(text, "reasoning reference") {
+		return false
+	}
+	for _, marker := range []string{
+		"invalid_request_error",
+		"invalid parameters",
+		"invalid_request",
+		"unprocessable entity",
+		"unsupported value",
+		"unsupported parameter",
+		"not supported",
+		"unknown parameter",
+		"unrecognized",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// dropReasoningControls removes the reasoning configuration from prepared
+// Responses-protocol bodies and reports whether any payload changed. It is the
+// fallback for a provider that rejects the requested effort level: the replay
+// runs at the model default instead of failing the client outright. Other
+// tiers/protocols are passed through untouched.
+func dropReasoningControls(route models.Route, bodies map[config.Tier][]byte) (map[config.Tier][]byte, bool) {
+	changed := false
+	out := make(map[config.Tier][]byte, len(bodies))
+	for tier, body := range bodies {
+		if len(body) == 0 || route.ProtocolFor(tier) != wire.Responses {
+			out[tier] = body
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			out[tier] = body
+			continue
+		}
+		if _, ok := payload["reasoning"]; !ok {
+			out[tier] = body
+			continue
+		}
+		delete(payload, "reasoning")
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			out[tier] = body
+			continue
+		}
+		out[tier] = encoded
+		changed = true
+	}
+	return out, changed
 }
 
 // stripStaleReasoningInputs removes server-issued reasoning references from
