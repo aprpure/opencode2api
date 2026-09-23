@@ -105,6 +105,105 @@ func TestAnthropicChatBudgetRoundTrip(t *testing.T) {
 	}
 }
 
+// TestResponsesEffortLadder pins the Anthropic -> Responses effort mapping.
+// Anthropic's "max" has no Responses equivalent (the OpenAI ladder stops at
+// "xhigh"), and forwarding it verbatim is rejected upstream with a generic
+// invalid_request_error, so it must land as "xhigh" on every path that can
+// produce a Responses body: the bridge, the same-protocol pass-through, and
+// an operator-forced level.
+func TestResponsesEffortLadder(t *testing.T) {
+	// Bridge path: Anthropic output_config.effort -> Responses reasoning.effort.
+	out, err := ConvertRequest(Anthropic, Responses, map[string]any{
+		"model":         "m",
+		"max_tokens":    2048,
+		"messages":      []any{map[string]any{"role": "user", "content": "hi"}},
+		"output_config": map[string]any{"effort": "max"},
+	})
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	reasoning, _ := out["reasoning"].(map[string]any)
+	if reasoning["effort"] != "xhigh" {
+		t.Fatalf("bridge effort = %v, want xhigh", reasoning["effort"])
+	}
+
+	// Pass-through path: a client posting reasoning.effort straight to
+	// /v1/responses bypasses the bridge and still needs the translation.
+	prepared, err := PrepareRequest(Responses, Responses, map[string]any{
+		"model":     "m",
+		"reasoning": map[string]any{"effort": "max"},
+		"input":     "hi",
+	}, "https://opencode.ai/zen")
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	reasoning, _ = prepared["reasoning"].(map[string]any)
+	if reasoning["effort"] != "xhigh" {
+		t.Fatalf("pass-through effort = %v, want xhigh", reasoning["effort"])
+	}
+
+	// Operator-forced path.
+	forced := map[string]any{"model": "m", "input": "hi"}
+	ForcedEffort(Responses, forced, "max")
+	reasoning, _ = forced["reasoning"].(map[string]any)
+	if reasoning["effort"] != "xhigh" {
+		t.Fatalf("forced effort = %v, want xhigh", reasoning["effort"])
+	}
+
+	// Every level the Responses ladder does define is forwarded unchanged.
+	for _, effort := range []string{"minimal", "low", "medium", "high", "xhigh"} {
+		body := map[string]any{"model": "m", "input": "hi"}
+		ForcedEffort(Responses, body, effort)
+		reasoning, _ = body["reasoning"].(map[string]any)
+		if reasoning["effort"] != effort {
+			t.Fatalf("effort %q was rewritten to %v", effort, reasoning["effort"])
+		}
+	}
+
+	// An unknown level is left for the upstream to judge, not silently
+	// rewritten by the gateway. ForcedEffort is not the right probe here: it
+	// rejects a level outside its own vocabulary before it ever reaches the
+	// ladder, so use the pass-through path.
+	unknown, err := PrepareRequest(Responses, Responses, map[string]any{
+		"model":     "m",
+		"reasoning": map[string]any{"effort": "ultra"},
+		"input":     "hi",
+	}, "https://opencode.ai/zen")
+	if err != nil {
+		t.Fatalf("prepare unknown: %v", err)
+	}
+	reasoning, _ = unknown["reasoning"].(map[string]any)
+	if reasoning["effort"] != "ultra" {
+		t.Fatalf("unknown effort = %v, want it passed through", reasoning["effort"])
+	}
+
+	// Chat and Anthropic targets keep their own ladders untouched.
+	chat, err := ConvertRequest(Anthropic, Chat, map[string]any{
+		"model":         "m",
+		"messages":      []any{map[string]any{"role": "user", "content": "hi"}},
+		"output_config": map[string]any{"effort": "max"},
+	})
+	if err != nil {
+		t.Fatalf("convert to chat: %v", err)
+	}
+	if chat["reasoning_effort"] != "max" {
+		t.Fatalf("chat effort = %v, want max untouched", chat["reasoning_effort"])
+	}
+	anthropic, err := ConvertRequest(Anthropic, Anthropic, map[string]any{
+		"model":         "m",
+		"max_tokens":    2048,
+		"messages":      []any{map[string]any{"role": "user", "content": "hi"}},
+		"output_config": map[string]any{"effort": "max"},
+	})
+	if err != nil {
+		t.Fatalf("convert to anthropic: %v", err)
+	}
+	outputConfig, _ := anthropic["output_config"].(map[string]any)
+	if outputConfig["effort"] != "max" {
+		t.Fatalf("anthropic effort = %v, want max untouched", outputConfig["effort"])
+	}
+}
+
 // TestChatUpstreamCarriesNoInternalFields is the regression test for the
 // upstream 400: a Claude-format request with thinking must encode to a Chat
 // body containing only fields an upstream Chat endpoint accepts. Internal
