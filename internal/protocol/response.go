@@ -402,6 +402,8 @@ func isToolStop(stop string) bool {
 // usableToolBlocks drops phantom tool blocks that cannot be executed by a
 // downstream client. Empty arguments are valid, so the tool name is the
 // minimum required signal here; the streaming emitter uses the same rule.
+// Filtering reuses the input's backing array: callers must not retain the
+// input slice after the call.
 func usableToolBlocks(tools []bridgeBlock) []bridgeBlock {
 	if len(tools) == 0 {
 		return nil
