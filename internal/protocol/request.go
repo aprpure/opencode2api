@@ -368,12 +368,6 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 			}
 			if role == "assistant" {
 				blocks = append(decodeChatReasoning(message), blocks...)
-				// A budget the gateway carried out on the assistant message is
-				// read back next to the effort, so both directions agree on the
-				// level the client originally named.
-				if budget := jsonutil.IntAt(message, "reasoning_budget_tokens"); budget > 0 {
-					request.Reasoning = withReasoningBudget(request.Reasoning, budget)
-				}
 			}
 			for j, rawCall := range jsonutil.SliceAt(message, "tool_calls") {
 				call, ok := rawCall.(map[string]any)
@@ -662,20 +656,10 @@ func encodeChatRequest(request bridgeRequest) (map[string]any, error) {
 	var pendingOrder []string
 	var deferred [][]bridgeBlock
 	// Anthropic's reasoning controls belong to a whole conversation, but Chat
-	// carries a single reasoning_effort for the request. The budget the client
-	// named is emitted once, on the first assistant message, so that decoding
-	// this Chat body back into Anthropic can restore the level exactly instead
-	// of re-deriving it from a bucket (32000 used to come back as 8192).
-	budgetCarried := false
-	carryBudget := func(encoded map[string]any) {
-		if budgetCarried {
-			return
-		}
-		if budget := reasoningBudget(request.Reasoning); budget > 0 {
-			encoded["reasoning_budget_tokens"] = budget
-			budgetCarried = true
-		}
-	}
+	// carries a single reasoning_effort for the request. Only the effort rung
+	// crosses the bridge: the exact budget_tokens is an in-memory value and is
+	// never written into the Chat body, because upstream vendors reject unknown
+	// fields and empty assistant turns with a 400.
 	flushDeferred := func() {
 		for _, blocks := range deferred {
 			if len(blocks) > 0 {
@@ -683,24 +667,6 @@ func encodeChatRequest(request bridgeRequest) (map[string]any, error) {
 			}
 		}
 		deferred = nil
-	}
-	// A conversation can end before any assistant turn exists to carry the
-	// budget. Attaching it to an empty assistant message keeps it on the wire
-	// without inventing visible output; Chat clients treat the empty turn as an
-	// assistant prefill.
-	carryBudgetOnly := func() {
-		if budgetCarried {
-			return
-		}
-		if budget := reasoningBudget(request.Reasoning); budget <= 0 {
-			return
-		}
-		encoded := map[string]any{"role": "assistant", "content": nil}
-		carryBudget(encoded)
-		if encoded["reasoning_budget_tokens"] == nil {
-			return
-		}
-		messages = append(messages, encoded)
 	}
 
 	for i, message := range request.Messages {
@@ -725,7 +691,6 @@ func encodeChatRequest(request bridgeRequest) (map[string]any, error) {
 				return nil, fmt.Errorf("messages[%d]: assistant message contains tool results", i)
 			}
 			encoded := map[string]any{"role": "assistant", "content": nil}
-			carryBudget(encoded)
 			if value, ok := bridgeReasoningText(reasoning); ok {
 				encoded["reasoning_content"] = value
 			}
@@ -756,7 +721,6 @@ func encodeChatRequest(request bridgeRequest) (map[string]any, error) {
 			}
 			if len(content) > 0 || len(reasoning) > 0 || len(calls) > 0 {
 				messages = append(messages, encoded)
-				budgetCarried = true
 			}
 			continue
 		}
@@ -799,7 +763,6 @@ func encodeChatRequest(request bridgeRequest) (map[string]any, error) {
 		return nil, fmt.Errorf("tool calls are missing results for %s", strings.Join(missingToolIDs(pendingOrder, pending), ", "))
 	}
 	flushDeferred()
-	carryBudgetOnly()
 	output["messages"] = messages
 
 	if len(request.Tools) > 0 {

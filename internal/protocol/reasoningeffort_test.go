@@ -2,7 +2,10 @@ package protocol
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+
+	"opencode2api/internal/jsonutil"
 )
 
 func TestEffortForThinkingBudgetRungs(t *testing.T) {
@@ -75,8 +78,10 @@ func TestExplicitEffortBeatsBudget(t *testing.T) {
 }
 
 func TestAnthropicChatBudgetRoundTrip(t *testing.T) {
-	// 32000 must survive Anthropic -> Chat -> Anthropic instead of
-	// collapsing to the 8192 rung.
+	// 32000 maps to the xhigh rung on the way to Chat. The exact budget is an
+	// in-memory value and is never serialized into the Chat body (upstream
+	// vendors reject unknown fields with a 400), so the way back restores the
+	// rung's lower bound (16384) rather than the original number.
 	chat, err := ConvertRequest(Anthropic, Chat, map[string]any{
 		"model":      "m",
 		"max_tokens": 40000,
@@ -94,9 +99,50 @@ func TestAnthropicChatBudgetRoundTrip(t *testing.T) {
 		t.Fatalf("c->a: %v", err)
 	}
 	thinking, _ := back["thinking"].(map[string]any)
-	if thinking["budget_tokens"] != float64(32000) {
+	if thinking["budget_tokens"] != float64(16384) {
 		encoded, _ := json.Marshal(back["thinking"])
-		t.Fatalf("budget_tokens = %s, want 32000", encoded)
+		t.Fatalf("budget_tokens = %s, want 16384 (xhigh rung)", encoded)
+	}
+}
+
+// TestChatUpstreamCarriesNoInternalFields is the regression test for the
+// upstream 400: a Claude-format request with thinking must encode to a Chat
+// body containing only fields an upstream Chat endpoint accepts. Internal
+// round-trip markers (reasoning_budget_tokens) and fabricated empty assistant
+// turns (content nil) must never reach the wire.
+func TestChatUpstreamCarriesNoInternalFields(t *testing.T) {
+	for _, input := range []map[string]any{
+		{
+			"model":      "m",
+			"max_tokens": 512,
+			"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
+			"thinking":   map[string]any{"type": "enabled", "budget_tokens": float64(1024)},
+		},
+		{
+			"model":         "m",
+			"max_tokens":    32768,
+			"messages":      []any{map[string]any{"role": "user", "content": "hi"}},
+			"thinking":      map[string]any{"type": "adaptive", "budget_tokens": float64(2048)},
+			"output_config": map[string]any{"effort": "max"},
+		},
+	} {
+		chat, err := ConvertRequest(Anthropic, Chat, input)
+		if err != nil {
+			t.Fatalf("convert: %v", err)
+		}
+		encoded, _ := json.Marshal(chat)
+		if strings.Contains(string(encoded), "reasoning_budget_tokens") {
+			t.Fatalf("internal marker leaked to Chat body: %s", encoded)
+		}
+		for i, raw := range jsonutil.SliceAt(chat, "messages") {
+			message, _ := raw.(map[string]any)
+			if message == nil {
+				continue
+			}
+			if message["content"] == nil && len(jsonutil.SliceAt(message, "tool_calls")) == 0 && jsonutil.StringAt(message, "reasoning_content") == "" {
+				t.Fatalf("messages[%d] is an empty assistant turn: %s", i, encoded)
+			}
+		}
 	}
 }
 

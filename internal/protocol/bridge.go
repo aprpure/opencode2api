@@ -339,43 +339,6 @@ func thinkingFor(effort any, budget int) map[string]any {
 	return map[string]any{"type": "enabled", "budget_tokens": float64(budget)}
 }
 
-// reasoningBudget reports the thinking budget a bridge-level reasoning value
-// names, or 0 when the value carries none.
-func reasoningBudget(value any) int {
-	object, ok := value.(map[string]any)
-	if !ok {
-		return 0
-	}
-	if budget := jsonutil.IntAt(object, "budget_tokens"); budget > 0 {
-		return budget
-	}
-	if _, ok := explicitEffort(object); !ok {
-		return 0
-	}
-	// An effort states a level, not a budget. A Chat client that sends only
-	// {"reasoning_effort":"high"} has no budget to carry.
-	return numericValueOrZero(object["reasoning_budget_tokens"])
-}
-
-// withReasoningBudget attaches a budget to a bridge-level reasoning value,
-// keeping any effort already present alongside it.
-func withReasoningBudget(value any, budget int) any {
-	if budget <= 0 {
-		return value
-	}
-	switch typed := value.(type) {
-	case map[string]any:
-		merged := make(map[string]any, len(typed)+1)
-		for key, existing := range typed {
-			merged[key] = existing
-		}
-		merged["budget_tokens"] = budget
-		return merged
-	default:
-		return map[string]any{"budget_tokens": budget, "effort": value}
-	}
-}
-
 // numericValue reads a JSON number out of a decoded body, which reports every
 // number as float64.
 func numericValue(value any) (int, bool) {
@@ -389,11 +352,6 @@ func numericValue(value any) (int, bool) {
 	default:
 		return 0, false
 	}
-}
-
-func numericValueOrZero(value any) int {
-	number, _ := numericValue(value)
-	return number
 }
 
 // budgetForEffort is the inverse of effortForThinkingBudget: the smallest
