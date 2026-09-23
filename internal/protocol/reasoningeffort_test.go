@@ -202,6 +202,42 @@ func TestResponsesEffortLadder(t *testing.T) {
 	if outputConfig["effort"] != "max" {
 		t.Fatalf("anthropic effort = %v, want max untouched", outputConfig["effort"])
 	}
+
+	// A Chat pass-through that carries reasoning.effort is a client speaking
+	// the object form on a native Chat endpoint. The ladder is scoped to the
+	// Responses target, so a Chat-native model that implements "max" must
+	// still receive it.
+	chatPassthrough, err := PrepareRequest(Chat, Chat, map[string]any{
+		"model":     "m",
+		"messages":  []any{map[string]any{"role": "user", "content": "hi"}},
+		"reasoning": map[string]any{"effort": "max"},
+	}, "https://opencode.ai/zen")
+	if err != nil {
+		t.Fatalf("prepare chat pass-through: %v", err)
+	}
+	chatReasoning, _ := chatPassthrough["reasoning"].(map[string]any)
+	if chatReasoning["effort"] != "max" {
+		t.Fatalf("chat pass-through effort = %v, want max untouched", chatReasoning["effort"])
+	}
+}
+
+// A budget the client names can derive the same top rung that an explicit
+// "max" does, so the ladder has to cover the derived path too, not just the
+// explicit one.
+func TestResponsesEffortLadderBudgetDerived(t *testing.T) {
+	out, err := ConvertRequest(Anthropic, Responses, map[string]any{
+		"model":      "m",
+		"max_tokens": 40000,
+		"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
+		"thinking":   map[string]any{"type": "enabled", "budget_tokens": float64(32768)},
+	})
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	reasoning, _ := out["reasoning"].(map[string]any)
+	if reasoning["effort"] != "xhigh" {
+		t.Fatalf("budget-derived effort = %v, want xhigh", reasoning["effort"])
+	}
 }
 
 // TestChatUpstreamCarriesNoInternalFields is the regression test for the

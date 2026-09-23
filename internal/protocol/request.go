@@ -23,8 +23,11 @@ func PrepareRequest(from, to Protocol, input map[string]any, upstreamURL string)
 	// Same-protocol requests are cloned rather than bridged, so the effort
 	// ladder is applied here too: a client that posts reasoning.effort
 	// straight to /v1/responses needs the same translation as one arriving
-	// from Anthropic.
-	clampResponsesBody(output)
+	// from Anthropic. Scoped to the Responses target on purpose: a
+	// Chat-native model that does implement "max" must keep it.
+	if to == Responses {
+		clampResponsesBody(output)
+	}
 	return output, nil
 }
 
