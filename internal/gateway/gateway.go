@@ -71,6 +71,7 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/chat/completions", g.authenticate(g.handleInference(wire.Chat)))
 	mux.HandleFunc("POST /v1/responses", g.authenticate(g.handleInference(wire.Responses)))
 	mux.HandleFunc("POST /v1/messages", g.authenticate(g.handleInference(wire.Anthropic)))
+	mux.HandleFunc("POST /v1/systemone", g.authenticate(g.handleSystemOne))
 	mux.HandleFunc("GET /healthz", g.handleHealth)
 	return telemetry.Recover(g.logger, mux)
 }
@@ -246,6 +247,114 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(responseBody)
 	}
+}
+
+// handleSystemOne forwards System One decision requests verbatim. The payload
+// pairs a free-form state with typed questions, which no message-shaped
+// upstream protocol accepts, so it is never translated: the body is relayed to
+// the upstream systemone endpoint and the typed answer document is returned
+// unchanged. System One answers are non-streaming today; a streaming upstream
+// reply is still relayed verbatim should that change.
+func (g *Gateway) handleSystemOne(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
+	if err != nil {
+		wire.WriteError(w, wire.SystemOne, http.StatusBadRequest, "request body is too large or unreadable", "invalid_request_error", "")
+		return
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		wire.WriteError(w, wire.SystemOne, http.StatusBadRequest, "request body must be a JSON object", "invalid_request_error", "")
+		return
+	}
+	model := jsonutil.StringAt(payload, "model")
+	meta := telemetry.MetaFromRequest(r)
+	if meta != nil {
+		meta.Model = model
+	}
+	if model == "" {
+		wire.WriteError(w, wire.SystemOne, http.StatusBadRequest, "model is required", "invalid_request_error", "model")
+		return
+	}
+	if !g.catalog.Supported(model) {
+		wire.WriteError(w, wire.SystemOne, http.StatusBadRequest, "the model uses an upstream protocol that opencode2api does not expose", "invalid_request_error", "model")
+		return
+	}
+	route, err := g.catalog.Route(model, len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0, g.cfg.Anonymous)
+	if err != nil {
+		wire.WriteError(w, wire.SystemOne, http.StatusBadRequest, err.Error(), "invalid_request_error", "model")
+		return
+	}
+	// System One has no translation layer, so only models whose upstream
+	// protocol is systemone can be served from this endpoint. A chat or
+	// responses model belongs on its own endpoint, where the bridge can convert
+	// it; forwarding it here would send a decision payload to a message API.
+	if route.Protocol != wire.SystemOne {
+		wire.WriteError(w, wire.SystemOne, http.StatusBadRequest, fmt.Sprintf("the model does not use the %s protocol", wire.SystemOne), "invalid_request_error", "model")
+		return
+	}
+	if meta != nil {
+		meta.Tier = string(route.Tier)
+		meta.Protocol = route.Protocol
+	}
+	// One verbatim body serves every tier: a decision payload has no per-tier
+	// encoding, so no protocol conversion is attempted.
+	bodies := make(map[config.Tier][]byte, len(route.KeyTiers)+1)
+	bodies[route.Tier] = body
+	for _, tier := range route.KeyTiers {
+		bodies[tier] = body
+	}
+	ids := identity.DeriveRequestIDs(r, payload)
+	if meta != nil {
+		meta.Request = ids.Request
+	}
+	requestCtx, cancel := context.WithTimeout(r.Context(), time.Duration(g.cfg.Retry.TimeoutSeconds)*time.Second)
+	defer cancel()
+	resp, upstreamRoute, err := g.doUpstream(requestCtx, route, bodies, ids)
+	if err != nil {
+		finalTier := route.Tier
+		if meta != nil && meta.Tier != "" {
+			finalTier = config.Tier(meta.Tier)
+		}
+		keyID, channel, anonymous := requestCredential(requestCtx)
+		g.logger.Warn("all upstream attempts failed", "component", "upstream", "event", "request_failed", "request_id", ids.Request, "tier", finalTier, "key_id", keyID, "channel", channel, "anonymous", anonymous, "error", err)
+		if errors.Is(err, context.DeadlineExceeded) {
+			wire.WriteError(w, wire.SystemOne, http.StatusGatewayTimeout, "upstream request timed out", "upstream_timeout", ids.Request)
+			return
+		}
+		wire.WriteError(w, wire.SystemOne, http.StatusBadGateway, "all upstream attempts failed", "upstream_error", ids.Request)
+		return
+	}
+	defer resp.Body.Close()
+	if meta != nil {
+		meta.Tier = string(upstreamRoute.Tier)
+		meta.Protocol = upstreamRoute.Protocol
+	}
+	w.Header().Set("x-request-id", ids.Request)
+	if resp.StatusCode/100 != 2 {
+		copyErrorResponse(w, wire.SystemOne, resp, ids.Request)
+		return
+	}
+	if contentType := resp.Header.Get("Content-Type"); strings.HasPrefix(contentType, "text/event-stream") {
+		if meta != nil {
+			meta.Stream = true
+		}
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+		return
+	}
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	if err != nil {
+		wire.WriteError(w, wire.SystemOne, http.StatusBadGateway, "failed to read upstream response", "upstream_error", ids.Request)
+		return
+	}
+	if usage, reported := wire.ResponseUsage(upstreamRoute.Protocol, responseBody); meta != nil {
+		meta.Usage, meta.UsageReported = usage, reported
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(responseBody)
 }
 
 func (g *Gateway) prepareRouteBodies(from wire.Protocol, route models.Route, input map[string]any) (map[config.Tier][]byte, error) {

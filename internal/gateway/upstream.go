@@ -333,8 +333,13 @@ var anonymousCoreTools = []string{"bash", "edit", "glob", "grep", "read"}
 // prepareAnonymousBody returns a copy of body normalized for the anonymous
 // free tier: streaming enabled plus the core agent tools present. Bodies
 // that already satisfy both (or are not JSON objects) are returned
-// unchanged.
+// unchanged. System One payloads are decision requests, not agent traffic, so
+// they are forwarded verbatim; injecting streaming or tool definitions would
+// make the upstream reject them.
 func prepareAnonymousBody(body []byte, protocol wire.Protocol) []byte {
+	if protocol == wire.SystemOne {
+		return body
+	}
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return body
