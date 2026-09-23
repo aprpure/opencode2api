@@ -272,11 +272,7 @@ func (g *Gateway) prepareRouteBodies(from wire.Protocol, route models.Route, inp
 		if tier == config.TierGo {
 			baseURL = g.cfg.Upstream.Go
 		}
-		requestInput := input
-		if from == wire.Responses && protocol != from && isMimo26Flash(route.ID) {
-			requestInput = dropNonFunctionResponsesTools(input)
-		}
-		upstreamPayload, err := wire.PrepareRequest(from, protocol, requestInput, baseURL)
+		upstreamPayload, err := wire.PrepareRequest(from, protocol, input, baseURL)
 		if err != nil {
 			if tier != route.Tier {
 				// A fallback tier may use a stricter wire format than the
@@ -297,34 +293,6 @@ func (g *Gateway) prepareRouteBodies(from wire.Protocol, route models.Route, inp
 		bodies[tier] = encoded
 	}
 	return bodies, nil
-}
-
-func isMimo26Flash(model string) bool {
-	parts := strings.Split(strings.ToLower(strings.TrimSpace(model)), "/")
-	return parts[len(parts)-1] == "mimo-v2.6-flash"
-}
-
-func dropNonFunctionResponsesTools(input map[string]any) map[string]any {
-	tools, ok := input["tools"].([]any)
-	if !ok {
-		return input
-	}
-	filtered := make([]any, 0, len(tools))
-	for _, raw := range tools {
-		tool, ok := raw.(map[string]any)
-		if ok && jsonutil.StringAt(tool, "type") == "function" {
-			filtered = append(filtered, raw)
-		}
-	}
-	if len(filtered) == len(tools) {
-		return input
-	}
-	request := make(map[string]any, len(input))
-	for key, value := range input {
-		request[key] = value
-	}
-	request["tools"] = filtered
-	return request
 }
 
 func copyErrorResponse(w http.ResponseWriter, protocol wire.Protocol, resp *http.Response, requestID string) {
