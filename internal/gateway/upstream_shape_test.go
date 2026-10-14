@@ -36,8 +36,26 @@ func TestShapeKeyBodyFreeVsPaid(t *testing.T) {
 	if payload["stream"] != true {
 		t.Fatalf("stream not forced: %v", payload["stream"])
 	}
-	if tools, _ := payload["tools"].([]any); len(tools) != 5 {
-		t.Fatalf("expected 5 tools injected, got %d", len(tools))
+	options, _ := payload["stream_options"].(map[string]any)
+	if options["include_usage"] != true {
+		t.Fatalf("include_usage not forced: %v", payload["stream_options"])
+	}
+	tools, _ := payload["tools"].([]any)
+	if len(tools) != len(anonymousCoreTools) {
+		t.Fatalf("expected %d tools injected, got %d", len(anonymousCoreTools), len(tools))
+	}
+	names := make(map[string]bool, len(tools))
+	for _, raw := range tools {
+		entry, _ := raw.(map[string]any)
+		fn, _ := entry["function"].(map[string]any)
+		if name, _ := fn["name"].(string); name != "" {
+			names[name] = true
+		}
+	}
+	for _, name := range anonymousCoreTools {
+		if !names[name] {
+			t.Fatalf("core tool %q missing from shaped body", name)
+		}
 	}
 
 	// Paid model: byte-identical passthrough.
@@ -45,9 +63,8 @@ func TestShapeKeyBodyFreeVsPaid(t *testing.T) {
 		t.Fatalf("paid body must pass through unchanged: changed=%v out=%q", changed, out)
 	}
 
-	// Already-shaped free body: no change reported, no Shaped marking downstream.
-	already := `{"model":"m","messages":[],"stream":true,"stream_options":{"include_usage":true},"tools":[{"type":"function","function":{"name":"bash","description":"b","parameters":{"type":"object"}}},{"type":"function","function":{"name":"edit","description":"b","parameters":{"type":"object"}}},{"type":"function","function":{"name":"glob","description":"b","parameters":{"type":"object"}}},{"type":"function","function":{"name":"grep","description":"b","parameters":{"type":"object"}}},{"type":"function","function":{"name":"read","description":"b","parameters":{"type":"object"}}},{"type":"function","function":{"name":"custom","description":"b","parameters":{"type":"object"}}}]}`
-	if out, changed := g.shapeKeyBody([]byte(already), shapeTestRoute("x-free"), config.TierZen); changed || string(out) != already {
+	// Shaping is idempotent: a second pass re-encodes the same bytes.
+	if out, changed := g.shapeKeyBody(shaped, shapeTestRoute("x-free"), config.TierZen); changed || string(out) != string(shaped) {
 		t.Fatalf("already-shaped body must pass through unchanged: changed=%v", changed)
 	}
 }
