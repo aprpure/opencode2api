@@ -308,7 +308,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		}
 		setRequestCredential(ctx, config.TierZen, "anonymous", "anonymous", true, node.proxy)
 		started := time.Now()
-		resp, err := doInferenceAttempt(node.proxy.client, req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second)
+		resp, err := doInferenceAttempt(node.proxy.client, req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second, g.attemptTimeout)
 		duration := time.Since(started)
 		if ctx.Err() != nil {
 			// The parent budget expired while this attempt was in flight. Its
@@ -327,7 +327,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 			return resp, nil, attempts
 		}
 		lastResponse = resp
-		lastErr = err
+		lastErr = asProxyUnavailable(node.proxy, err)
 		if err != nil {
 			g.logger.Debug("anonymous transport attempt failed", "component", "upstream", "event", "anonymous_attempt_transport_failed", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "duration_ms", duration.Milliseconds(), "error", err)
 		} else {
@@ -339,6 +339,9 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	}
 	if lastErr == nil {
 		lastErr = errors.New("no healthy anonymous proxies available")
+		if !g.transports.hasHealthy() {
+			lastErr = fmt.Errorf("no healthy anonymous proxies available: %w", errProxyUnavailable)
+		}
 	}
 	return nil, lastErr, attempts
 }
@@ -654,11 +657,11 @@ func (g *Gateway) doSelectedKeyUpstream(ctx context.Context, route models.Route,
 		return nil, err, 0
 	}
 	started := time.Now()
-	resp, err := doInferenceAttempt(proxy.client, req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second)
+	resp, err := doInferenceAttempt(proxy.client, req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second, g.attemptTimeout)
 	duration := time.Since(started)
 	g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+1, keyID, "key", false, proxy, resp, err, duration)
 	if err != nil {
-		return nil, err, 1
+		return nil, asProxyUnavailable(proxy, err), 1
 	}
 	return resp, nil, 1
 }
@@ -723,7 +726,7 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 		keyID := config.KeyDisplayID(node.key)
 		setRequestCredential(ctx, route.Tier, keyID, "key", false, proxy)
 		attemptStarted := time.Now()
-		resp, err := doInferenceAttempt(proxy.client, req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second)
+		resp, err := doInferenceAttempt(proxy.client, req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second, g.attemptTimeout)
 		attemptDuration := time.Since(attemptStarted)
 		if ctx.Err() != nil {
 			// The request budget expired while this attempt was in flight. A
@@ -751,7 +754,7 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 			return resp, nil, attempts
 		}
 		lastResponse = resp
-		lastErr = err
+		lastErr = asProxyUnavailable(proxy, err)
 		if err != nil {
 			g.logger.Debug("upstream transport attempt failed", "component", "upstream", "event", "attempt_transport_failed", "request_id", ids.Request, "attempt", attempts, "tier", route.Tier, "key_id", keyID, "proxy", config.RedactURL(proxy.name), "duration_ms", attemptDuration.Milliseconds(), "error", err)
 		} else {
@@ -847,11 +850,7 @@ func (g *Gateway) recordUpstreamAttempt(ctx context.Context, route models.Route,
 		}
 		leg := label + ":"
 		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) {
-				leg += "timeout"
-			} else {
-				leg += "transport"
-			}
+			leg += classifyAttemptError(err)
 		} else {
 			leg += strconv.Itoa(status)
 		}

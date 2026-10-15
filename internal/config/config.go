@@ -68,6 +68,9 @@ type RetryConfig struct {
 type ModelsConfig struct {
 	RefreshSeconds int               `json:"refresh_seconds"`
 	Protocols      map[string]string `json:"protocols"`
+	// FreeOnly limits discovery and routing to free models, even when Zen or
+	// Go keys could serve paid ones. Free models may still fall back to keys.
+	FreeOnly bool `json:"free_only"`
 }
 
 type LoggingConfig struct {
@@ -102,19 +105,22 @@ type PerformanceConfig struct {
 // AttemptTimeout bounds how long a single upstream attempt may wait for
 // response headers before it is abandoned and the next node is tried. Values
 // <= 0 keep the historical behavior of using the request-level retry timeout,
-// so existing configs are unaffected. The result never exceeds requestTimeout,
-// and only the header wait is bounded: an established stream keeps flowing
-// under the request-level timeout.
+// so existing configs are unaffected. The result never exceeds requestTimeout.
+// It bounds the whole attempt up to the response being released (dial, request
+// write, headers and, when enabled, the first SSE event); an established
+// stream keeps flowing under the request-level timeout.
+//
+// The bound is installed on the shared transports as the header wait and on
+// each attempt's context, so it covers every attempt in both the anonymous and
+// the authenticated loops. Without it, one hung exit can consume the entire
+// request budget by itself, and the attempts that follow are fired against an
+// already-expired context.
 //
 // Default 60s rationale: normal first-token latencies are single-digit
 // seconds (10x headroom), while a hung attempt previously consumed the whole
 // request budget and poisoned every follow-up failover with an expired
 // context. Tailed queueing beyond 60s is possible on congested free tiers —
 // raise this if TTFT p95 approaches the bound (see ttft_p50/p95 in monitor).
-// The bound is installed on the shared transports, so it covers every attempt
-// in both the anonymous and the authenticated loops. Without it, one hung exit
-// can consume the entire request budget by itself, and the attempts that follow
-// are fired against an already-expired context.
 func (cfg PerformanceConfig) AttemptTimeout(requestTimeout time.Duration) time.Duration {
 	if cfg.AttemptTimeoutSeconds > 0 {
 		attempt := time.Duration(cfg.AttemptTimeoutSeconds) * time.Second
