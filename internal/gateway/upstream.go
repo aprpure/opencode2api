@@ -259,27 +259,35 @@ func (g *Gateway) doUpstreamTiers(ctx context.Context, route models.Route, bodie
 	return nil, effectiveRoute, attempts, lastErr
 }
 
-// doAnonymousUpstream tries every currently available proxy at most once. Any
-// failure, including an HTTP error response, advances to the next proxy. Only a
-// successful response ends the anonymous phase; exhausting the proxy cursor
-// returns control to the preferred authenticated tiers.
+// doAnonymousUpstream tries every currently available proxy at most once. For
+// each proxy it prefers the legacy /zen/v1 lane (LegacyZenBase) before falling
+// back to the newer /inference upstream (Upstream.Anonymous). Any failure,
+// including an HTTP error response, advances to the next upstream or proxy.
+// Only a successful response ends the anonymous phase; exhausting the proxy
+// cursor returns control to the preferred authenticated tiers.
 func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, error, int) {
 	var lastResponse *http.Response
 	var lastErr error
 	cursor := g.anonymous.CursorFor(ids.Session)
 	limit := g.anonymous.Len()
+	proxies := 0
 	attempts := 0
-	body := bodies[config.TierZen]
-	if len(body) == 0 {
+	rawBody := bodies[config.TierZen]
+	if len(rawBody) == 0 {
 		return nil, errors.New("no prepared Zen request body"), 0
 	}
 	// The anonymous free tier only serves agent-shaped streaming requests
-	// carrying the official core tool definitions (anything else is rejected
-	// with 403 FreeTierError). Normalize the wire body here; the gateway
-	// collapses the stream back when the downstream client asked for a plain
-	// JSON reply. Key tiers keep their original bodies.
-	body = prepareAnonymousBody(body, route.ProtocolFor(config.TierZen))
-	for attempts < limit {
+	// carrying the core tool definitions (anything else is rejected with 403
+	// FreeTierError). Normalize the wire body per upstream gate (legacy /zen/v1
+	// vs /inference); the gateway collapses the stream back when the downstream
+	// client asked for a plain JSON reply. Key tiers keep their original bodies.
+	protocol := route.ProtocolFor(config.TierZen)
+	upstreams := g.anonymousUpstreams()
+	preparedBodies := make([][]byte, len(upstreams))
+	for i, baseURL := range upstreams {
+		preparedBodies[i] = prepareAnonymousBody(rawBody, protocol, isLegacyZenUpstream(baseURL))
+	}
+	for proxies < limit {
 		if ctx.Err() != nil {
 			// The request-level budget is already gone. Stop scanning instead
 			// of firing attempts that cannot succeed and then recording them
@@ -293,46 +301,68 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		if node == nil {
 			break
 		}
-		attempts++
-		if meta := telemetry.MetaFromContext(ctx); meta != nil {
-			meta.Attempts = attemptOffset + attempts
-			meta.Tier = string(config.TierZen)
-		}
-		if lastResponse != nil {
-			httpx.DrainAndClose(lastResponse.Body)
-			lastResponse = nil
-		}
-		req, err := newUpstreamRequest(ctx, g.cfg.Upstream.Anonymous, route.Protocol, body, ids, anonymousZenKey)
-		if err != nil {
-			return nil, err, attempts
-		}
-		setRequestCredential(ctx, config.TierZen, "anonymous", "anonymous", true, node.proxy)
-		started := time.Now()
-		resp, err := doInferenceAttempt(node.proxy.client, req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second, g.attemptTimeout)
-		duration := time.Since(started)
-		if ctx.Err() != nil {
-			// The parent budget expired while this attempt was in flight. Its
-			// outcome says nothing about this proxy, so record nothing and stop
-			// scanning.
-			lastResponse, lastErr = resp, err
-			if lastErr == nil && lastResponse == nil {
-				lastErr = ctx.Err()
+		proxies++
+		var nodeResp *http.Response
+		var nodeErr error
+		for index, baseURL := range upstreams {
+			if ctx.Err() != nil {
+				if lastErr == nil && lastResponse == nil {
+					lastErr = ctx.Err()
+				}
+				break
 			}
+			attempts++
+			if meta := telemetry.MetaFromContext(ctx); meta != nil {
+				meta.Attempts = attemptOffset + attempts
+				meta.Tier = string(config.TierZen)
+			}
+			if lastResponse != nil {
+				httpx.DrainAndClose(lastResponse.Body)
+				lastResponse = nil
+			}
+			req, err := newUpstreamRequest(ctx, baseURL, route.Protocol, preparedBodies[index], ids, anonymousZenKey)
+			if err != nil {
+				return nil, err, attempts
+			}
+			setRequestCredential(ctx, config.TierZen, "anonymous", "anonymous", true, node.proxy)
+			started := time.Now()
+			resp, err := doInferenceAttempt(node.proxy.client, req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second, g.attemptTimeout)
+			duration := time.Since(started)
+			if ctx.Err() != nil {
+				// The parent budget expired while this attempt was in flight. Its
+				// outcome says nothing about this proxy, so record nothing and stop
+				// scanning.
+				lastResponse, lastErr = resp, err
+				if lastErr == nil && lastResponse == nil {
+					lastErr = ctx.Err()
+				}
+				break
+			}
+			nodeResp, nodeErr = resp, err
+			g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, node.proxy, resp, err, duration)
+			if err == nil && resp.StatusCode/100 == 2 {
+				g.observeAnonymousResult(ctx, node, resp, nil)
+				g.logger.Debug("anonymous upstream accepted request", "component", "upstream", "event", "anonymous_attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
+				return resp, nil, attempts
+			}
+			lastResponse = resp
+			lastErr = asProxyUnavailable(node.proxy, err)
+			if err != nil {
+				g.logger.Debug("anonymous transport attempt failed", "component", "upstream", "event", "anonymous_attempt_transport_failed", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "duration_ms", duration.Milliseconds(), "error", err)
+				if isProxyFailure(err) {
+					break
+				}
+			} else {
+				g.logger.Debug("anonymous upstream returned an error response; trying the next upstream or proxy", "component", "upstream", "event", "anonymous_attempt_response_failed", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
+			}
+			if index+1 < len(upstreams) && !node.proxy.healthy.Load() {
+				break
+			}
+		}
+		if ctx.Err() != nil {
 			break
 		}
-		g.observeAnonymousResult(ctx, node, resp, err)
-		g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, node.proxy, resp, err, duration)
-		if err == nil && resp.StatusCode/100 == 2 {
-			g.logger.Debug("anonymous upstream accepted request", "component", "upstream", "event", "anonymous_attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
-			return resp, nil, attempts
-		}
-		lastResponse = resp
-		lastErr = asProxyUnavailable(node.proxy, err)
-		if err != nil {
-			g.logger.Debug("anonymous transport attempt failed", "component", "upstream", "event", "anonymous_attempt_transport_failed", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "duration_ms", duration.Milliseconds(), "error", err)
-		} else {
-			g.logger.Debug("anonymous upstream returned an error response; trying the next proxy", "component", "upstream", "event", "anonymous_attempt_response_failed", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
-		}
+		g.observeAnonymousResult(ctx, node, nodeResp, nodeErr)
 	}
 	if lastResponse != nil {
 		return lastResponse, nil, attempts
@@ -346,18 +376,46 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	return nil, lastErr, attempts
 }
 
-// anonymousCoreTools are the tool names the anonymous free tier expects on
-// an agent-shaped request. Requests without a shell tool and a read tool are
+// anonymousUpstreams returns the ordered base URLs for the keyless free-tier
+// lane: the legacy /zen/v1 origin (models.LegacyZenBase) is tried first, and
+// the configured /inference origin (Upstream.Anonymous) is kept as a fallback.
+func (g *Gateway) anonymousUpstreams() []string {
+	legacy := strings.TrimRight(models.LegacyZenBase, "/")
+	primary := strings.TrimRight(g.cfg.Upstream.Anonymous, "/")
+	if primary == "" || strings.EqualFold(legacy, primary) {
+		return []string{models.LegacyZenBase}
+	}
+	return []string{models.LegacyZenBase, g.cfg.Upstream.Anonymous}
+}
+
+// isLegacyZenUpstream reports whether baseURL targets the legacy /zen/v1
+// gate rather than the newer /inference gate.
+func isLegacyZenUpstream(baseURL string) bool {
+	trimmed := strings.ToLower(strings.TrimRight(strings.TrimSpace(baseURL), "/"))
+	if strings.EqualFold(trimmed, strings.TrimRight(models.LegacyZenBase, "/")) {
+		return true
+	}
+	return strings.HasSuffix(trimmed, "/zen")
+}
+
+// legacyAnonymousCoreTools are the pre-2.x OpenCode 1.18.x tool names expected
+// by the legacy /zen/v1 free-tier gate ("bash" + "read" required; stub
+// definitions pass without schema validation).
+var legacyAnonymousCoreTools = []string{"bash", "edit", "glob", "grep", "read"}
+
+// anonymousCoreTools are the tool names the /inference free-tier gate expects
+// on an agent-shaped request. Requests without a shell tool and a read tool are
 // rejected with 403 FreeTierError.
 //
 // "shell" is the name OpenCode 2.x ships; the pre-2.x "bash" spelling is
-// deliberately not injected because the free tier validates the definition of
-// every tool it recognises, and a "bash" definition the gateway synthesises
-// does not match the one upstream expects. Since 2026-10-14 name presence is
-// not enough either: the upstream compares each recognised tool's description
-// and parameter schema against the official CLI's definitions byte-for-byte
-// (minimal stand-ins 403), which is why the genuine definitions below are
-// embedded. Tool order is irrelevant and extra client tools are allowed.
+// deliberately not injected on /inference because that gate validates the
+// definition of every tool it recognises, and a "bash" definition the gateway
+// synthesises does not match the one upstream expects. Since 2026-10-14 name
+// presence is not enough on /inference either: the upstream compares each
+// recognised tool's description and parameter schema against the official CLI's
+// definitions byte-for-byte (minimal stand-ins 403), which is why the genuine
+// definitions below are embedded. Tool order is irrelevant and extra client
+// tools are allowed.
 var anonymousCoreTools = []string{"shell", "edit", "glob", "grep", "read"}
 
 // opencodeToolsJSON holds the genuine OpenCode tool definitions (description
@@ -394,12 +452,14 @@ func knownOpencodeTool(name string) (opencodeToolDefinition, bool) {
 }
 
 // prepareAnonymousBody returns a copy of body normalized for the anonymous
-// free tier: streaming enabled plus the core agent tools present with genuine
-// definitions. Bodies that already satisfy all of that (or are not JSON
-// objects) are returned unchanged. System One payloads are decision requests,
-// not agent traffic, so they are forwarded verbatim; injecting streaming or
-// tool definitions would make the upstream reject them.
-func prepareAnonymousBody(body []byte, protocol wire.Protocol) []byte {
+// free tier: streaming enabled plus the core agent tools present (using
+// legacyAnonymousCoreTools for the legacy /zen/v1 gate and anonymousCoreTools
+// with genuine definitions for the /inference gate). Bodies that already
+// satisfy all of that (or are not JSON objects) are returned unchanged. System
+// One payloads are decision requests, not agent traffic, so they are forwarded
+// verbatim; injecting streaming or tool definitions would make the upstream
+// reject them.
+func prepareAnonymousBody(body []byte, protocol wire.Protocol, legacy bool) []byte {
 	if protocol == wire.SystemOne {
 		return body
 	}
@@ -415,7 +475,7 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol) []byte {
 	if ensureAnonymousChatUsage(payload, protocol) {
 		changed = true
 	}
-	if ensureAnonymousTools(payload, protocol) {
+	if ensureAnonymousTools(payload, protocol, legacy) {
 		changed = true
 	}
 	if !changed {
@@ -450,13 +510,18 @@ func ensureAnonymousChatUsage(payload map[string]any, protocol wire.Protocol) bo
 
 // ensureAnonymousTools makes the tool list read as an agent session: every
 // recognised OpenCode tool carries its genuine definition, and the missing
-// core tools are appended. It reports whether the payload changed. Tools whose
-// names upstream does not recognise are left exactly as the client declared
-// them, so downstream function calling keeps working.
-func ensureAnonymousTools(payload map[string]any, protocol wire.Protocol) bool {
+// core tools (legacy /zen/v1 or /inference) are appended. It reports whether
+// the payload changed. Tools whose names upstream does not recognise are left
+// exactly as the client declared them, so downstream function calling keeps
+// working.
+func ensureAnonymousTools(payload map[string]any, protocol wire.Protocol, legacy bool) bool {
+	coreTools := anonymousCoreTools
+	if legacy {
+		coreTools = legacyAnonymousCoreTools
+	}
 	raw, exists := payload["tools"]
 	if !exists {
-		payload["tools"] = anonymousToolset(protocol, nil)
+		payload["tools"] = anonymousToolset(protocol, coreTools)
 		return true
 	}
 	items, ok := raw.([]any)
@@ -479,8 +544,8 @@ func ensureAnonymousTools(payload map[string]any, protocol wire.Protocol) bool {
 			changed = true
 		}
 	}
-	missing := make([]string, 0, len(anonymousCoreTools))
-	for _, name := range anonymousCoreTools {
+	missing := make([]string, 0, len(coreTools))
+	for _, name := range coreTools {
 		if !present[name] {
 			missing = append(missing, name)
 		}
@@ -612,7 +677,11 @@ func (g *Gateway) shapeKeyBody(body []byte, route models.Route, tier config.Tier
 	if !g.catalog.IsFreeModel(route.ID) {
 		return body, false
 	}
-	shaped := prepareAnonymousBody(body, route.ProtocolFor(tier))
+	baseURL := g.cfg.Upstream.Zen
+	if tier == config.TierGo {
+		baseURL = g.cfg.Upstream.Go
+	}
+	shaped := prepareAnonymousBody(body, route.ProtocolFor(tier), isLegacyZenUpstream(baseURL))
 	return shaped, !bytes.Equal(shaped, body)
 }
 

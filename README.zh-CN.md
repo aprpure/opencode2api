@@ -1,6 +1,6 @@
 # opencode2api
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+[English](README.md) | [简体中文](README.zh-CN.md) | [Tiếng Việt](README.vi.md)
 
 使用 Go 编写的 **OpenCode Zen / Zen Go API 网关**。对外提供 Chat Completions、Responses 和 Anthropic Messages 接口，按上游原生协议转换请求，并统一管理上游 Key 与代理。
 
@@ -382,6 +382,17 @@ Playground 需要已登录的 Session 和 `X-CSRF-Token`，每个客户端 IP �
 
 执行后，管理接口返回 HTTP 200，实际结果位于 `ok`、`http_status`、`request_id`、`route` 和 `response`。指定 Key 时还返回 `selected_key` 与 `key_test`，其值包括 `usable`、`rejected`、`rate_limited`、`transport_error`、`upstream_error`、`request_error`、`unavailable`。管理请求格式、认证、CSRF 和限速错误仍返回各自对应的 HTTP 状态。
 
+### 界面语言
+
+WebUI 从 `webui/js/i18n.js` 加载翻译，内置 **简体中文**（默认）、**English** 和 **Tiếng Việt**。原始简体中文文案保留在 `index.html` 和 `webui/js/` 中，并始终作为缺少翻译时的回退，因此新增语言不会覆盖原文。
+
+- 语言选择器位于顶部工具栏右侧，登录卡片上也有一个。
+- 选择结果保存在 `localStorage`，键名为 `opencode2api.ui.lang`。
+- 切换语言会同时重绘静态文案（`data-i18n`、`data-i18n-attr`）和 JavaScript 生成的文案，无需刷新页面。
+- 日期时间格式跟随所选语言。
+
+新增语言时，在 `webui/js/i18n.js` 的 `DICTIONARY` 中增加一个语言块，并在 `SUPPORTED`、`LABELS` 和 `DATE_LOCALES` 中登记其代码。
+
 ### 保存与重载
 
 服务先验证候选配置并创建新的 Gateway，然后保存配置并切换实例。验证或保存失败时，当前 Gateway 继续处理请求；已经开始的请求继续使用原有实例。
@@ -436,10 +447,10 @@ internal/
   protocol/              请求和响应转换、SSE 解析与输出
   telemetry/             请求跟踪、指标、日志与异常恢复
 webui/
-  embed.go               将三个静态资源内嵌到可执行文件
+  embed.go               将静态资源内嵌到可执行文件
   index.html             页面结构
-  app.js                 界面交互
-  styles.css             界面样式
+  css/                   设计 token、基础样式、组件与页面布局
+  js/                    ES 模块：外壳、i18n、共享辅助与每页一个模块
 ```
 
 建议阅读顺序：
@@ -447,7 +458,7 @@ webui/
 1. [程序入口](cmd/opencode2api/main.go) → [运行时管理](internal/gateway/runtime.go) → [HTTP 处理](internal/gateway/gateway.go)。
 2. [上游请求](internal/gateway/upstream.go)和[模型路由](internal/models/catalog.go)说明请求如何选择并到达上游。
 3. [请求转换](internal/protocol/request.go)、[响应转换](internal/protocol/response.go)和[流式传输](internal/protocol/stream.go)说明协议处理过程。
-4. [管理路由](internal/admin/server.go)和 [WebUI 交互](webui/app.js)说明配置编辑与诊断功能。
+4. [管理路由](internal/admin/server.go)和 [WebUI 交互](webui/js/main.js)说明配置编辑与诊断功能。
 
 执行 Go 格式化、静态分析和程序构建：
 
@@ -462,10 +473,10 @@ go build -o opencode2api ./cmd/opencode2api
 Node.js 仅用于 WebUI 的 JavaScript 语法检查：
 
 ```bash
-node --check webui/app.js
+for f in webui/js/*.js webui/js/pages/*.js; do node --input-type=module --check < "$f"; done
 ```
 
-项目通过 `.editorconfig`、`.gitattributes` 和 Go 格式化统一格式。CI 覆盖 Linux / Windows 上的 Go 1.24 与稳定版 Go 的 `go vet` 和构建，以及 Go 格式、WebUI 语法和容器入口脚本语法检查。发布压缩包包含中英文两份 README。
+项目通过 `.editorconfig`、`.gitattributes` 和 Go 格式化统一格式。CI 覆盖 Linux / Windows 上的 Go 1.24 与稳定版 Go 的 `go vet` 和构建，以及 Go 格式、WebUI 语法和容器入口脚本语法检查。发布压缩包包含中英越三份 README。
 
 ## 常见问题
 

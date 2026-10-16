@@ -222,11 +222,16 @@ func (g *Gateway) refreshAnonymousTier(ctx context.Context, base string) []strin
 			break
 		}
 		refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		models, status, err := modelcatalog.FetchModels(refreshCtx, node.proxy.client, base, anonymousZenKey)
-		if err != nil && status == 404 {
-			// The new inference backend does not expose a models listing;
-			// probe the legacy Zen console origin once before giving up.
-			models, status, err = modelcatalog.FetchModels(refreshCtx, node.proxy.client, modelcatalog.LegacyZenBase, anonymousZenKey)
+		var models []string
+		var status int
+		var err error
+		// Prefer the legacy /zen/v1 models listing before falling back to the
+		// configured anonymous upstream.
+		for _, upstream := range g.anonymousUpstreams() {
+			models, status, err = modelcatalog.FetchModels(refreshCtx, node.proxy.client, upstream, anonymousZenKey)
+			if err == nil {
+				break
+			}
 		}
 		g.syncProxyResult(refreshCtx, node.proxy, status, err)
 		cancel()
