@@ -18,10 +18,12 @@ const (
 )
 
 // syncProxyResult updates proxy health from real traffic. Only timeouts and
-// connection refusals mark a proxy unavailable. Other errors and 4xx/5xx
-// responses trigger a neutral URL check without being treated as proxy failure.
+// connection refusals mark a proxy unavailable. Any HTTP response — including
+// 4xx/5xx — proves the route is reachable and restores a proxy evicted by an
+// earlier transient failure, so a rate-limited exit is never blamed on the
+// proxy route itself.
 func (g *Gateway) syncProxyResult(ctx context.Context, proxy *proxyTransport, status int, err error) bool {
-	if proxy == nil {
+	if proxy == nil || proxy.pool {
 		return false
 	}
 	if isProxyFailure(err) {
@@ -36,12 +38,19 @@ func (g *Gateway) syncProxyResult(ctx context.Context, proxy *proxyTransport, st
 		}
 		return false
 	}
+	if err == nil && status >= 400 && status < 600 {
+		// Receiving an HTTP status from the upstream proves the proxy route
+		// itself is reachable; restore an unhealthy flag left by an earlier
+		// transient timeout instead of keeping the route evicted.
+		wasHealthy := proxy.healthy.Swap(true)
+		if !wasHealthy {
+			g.restoreProxy(proxy)
+		}
+		return false
+	}
 	if err != nil {
 		g.verifyProxyAfterError(ctx, proxy, status)
 		return false
-	}
-	if status >= 400 && status < 600 {
-		g.verifyProxyAfterError(ctx, proxy, status)
 	}
 	return false
 }
@@ -216,6 +225,9 @@ func (g *Gateway) refreshZen(ctx context.Context) []string {
 func (g *Gateway) refreshAnonymousTier(ctx context.Context, base string) []string {
 	cursor := g.anonymous.CursorFor("")
 	limit := g.anonymous.Len()
+	if g.anonymous.HasPool() && g.cfg.Retry.MaxAttempts > limit {
+		limit = g.cfg.Retry.MaxAttempts
+	}
 	for attempt := 1; attempt <= limit; attempt++ {
 		node := cursor.Next()
 		if node == nil {

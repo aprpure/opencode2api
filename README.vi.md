@@ -306,6 +306,27 @@ direct
 
 Dấu bắt đầu chú thích là `#`, `;` và `//`, ở đầu dòng hoặc sau khoảng trắng.
 
+#### Proxy pool luân chuyển
+
+Thêm hậu tố `#pool` (hoặc tiền tố `pool+`) vào một mục để khai báo rằng endpoint đó là proxy pool luân chuyển như [Resin](https://github.com/Resinat/Resin), nơi mỗi kết nối TCP mới đi ra từ một IP khác:
+
+```text
+http://127.0.0.1:7890#pool
+socks5://127.0.0.1:1080#pool
+pool+http://127.0.0.1:7891
+```
+
+Mục `#pool` được xử lý khác hoàn toàn so với proxy tĩnh:
+
+| Hành vi               | Proxy tĩnh                                                     | Mục `#pool`                                                              |
+| --------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| Tái sử dụng kết nối   | Keep-alive và ghép kênh HTTP/2 (tham số `performance.*`)       | Một tunnel TCP + CONNECT mới cho mỗi request (`DisableKeepAlives`, không HTTP/2) |
+| Cooldown khi lỗi      | 15s–120s lùi theo cấp số nhân, cộng thêm `Retry-After`         | Không: request kế tiếp lấy luôn exit IP mới                              |
+| Loại bỏ theo sức khoẻ | Đánh dấu không khoẻ, chuyển key, kiểm tra lại mỗi 15 phút      | Không bao giờ bị loại bỏ; bỏ qua hoàn toàn health check                 |
+| Số lần thử kênh ẩn danh | Tối đa một lần cho mỗi proxy đã cấu hình                     | Tối đa `retry.max_attempts` lần, quay vòng mục pool                      |
+
+Dùng khi bản thân endpoint sau URL đã tự luân chuyển, còn từng exit IP trong pool bị giới hạn riêng hoặc chập chờn: gateway sẽ coi mỗi lần thử là một endpoint mới thay vì ghim cả phiên vào một exit. Chỉ cần một mục `#pool` là đủ, không cần liệt kê hàng chục exit. Các mục tĩnh vẫn giữ hành vi pooling mô tả bên dưới.
+
 ### Timeout và connection pool
 
 | Trường                                   | Mặc định | Ý nghĩa                                                     |

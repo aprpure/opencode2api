@@ -25,7 +25,7 @@ func TestShapeKeyBodyFreeVsPaid(t *testing.T) {
 	g := shapeTestGateway()
 	plain := `{"model":"m","messages":[],"stream":false}`
 
-	shaped, changed := g.shapeKeyBody([]byte(plain), shapeTestRoute("x-free"), config.TierZen)
+	shaped, _, changed := g.shapeKeyBody([]byte(plain), shapeTestRoute("x-free"), config.TierZen)
 	if !changed {
 		t.Fatal("expected free model body to be shaped")
 	}
@@ -59,12 +59,12 @@ func TestShapeKeyBodyFreeVsPaid(t *testing.T) {
 	}
 
 	// Paid model: byte-identical passthrough.
-	if out, changed := g.shapeKeyBody([]byte(plain), shapeTestRoute("gpt-5"), config.TierZen); changed || string(out) != plain {
+	if out, _, changed := g.shapeKeyBody([]byte(plain), shapeTestRoute("gpt-5"), config.TierZen); changed || string(out) != plain {
 		t.Fatalf("paid body must pass through unchanged: changed=%v out=%q", changed, out)
 	}
 
 	// Shaping is idempotent: a second pass re-encodes the same bytes.
-	if out, changed := g.shapeKeyBody(shaped, shapeTestRoute("x-free"), config.TierZen); changed || string(out) != string(shaped) {
+	if out, _, changed := g.shapeKeyBody(shaped, shapeTestRoute("x-free"), config.TierZen); changed || string(out) != string(shaped) {
 		t.Fatalf("already-shaped body must pass through unchanged: changed=%v", changed)
 	}
 }

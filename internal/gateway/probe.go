@@ -61,7 +61,8 @@ func probePayload(model string, protocol wire.Protocol, effort string, legacy bo
 	if err != nil {
 		return nil, err
 	}
-	return prepareAnonymousBody(b, protocol, legacy), nil
+	shaped, _ := prepareAnonymousBody(b, protocol, legacy)
+	return shaped, nil
 }
 
 func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult {
