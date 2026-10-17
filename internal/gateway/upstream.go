@@ -215,11 +215,7 @@ func (g *Gateway) doUpstreamTiers(ctx context.Context, route models.Route, bodie
 	if ctx.Err() != nil {
 		// The anonymous phase already consumed the request budget. Entering the
 		// authenticated tiers here would only fire instant attempts against a
-		// dead context, cooling keys that were never really tried. If a real
-		// response was captured before the budget expired, return it (an
-		// actionable upstream status beats a generic timeout); otherwise the
-		// expired budget surfaces as context.DeadlineExceeded, which the handler
-		// maps to 504.
+		// dead context, cooling keys that were never really tried.
 		if lastResponse != nil {
 			return lastResponse, effectiveRoute, attempts, nil
 		}

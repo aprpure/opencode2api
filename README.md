@@ -343,8 +343,8 @@ Use it when the endpoint behind the URL already performs the rotation and the po
 | Field                                   | Default | Meaning                                                |
 | --------------------------------------- | ------- | ------------------------------------------------------ |
 | `retry.max_attempts`                    | `3`     | Attempts per authenticated tier, including the first.  |
-| `retry.timeout_seconds`                 | `1800`  | Total inference timeout, including stream consumption. |
-| `performance.attempt_timeout_seconds`   | `60`    | Whole-attempt bound; 0 uses the request timeout.       |
+| `retry.timeout_seconds`                 | `300`   | Total inference timeout, including stream consumption. |
+| `performance.attempt_timeout_seconds`   | `0`     | Whole-attempt bound; 0 uses the request timeout.       |
 | `performance.connect_timeout_seconds`   | `5`     | Connection establishment timeout.                      |
 | `performance.failure_cooldown_seconds`  | `15`    | Base failure cooldown.                                 |
 | `performance.max_idle_conns`            | `2048`  | Idle connection limit per proxy transport.             |

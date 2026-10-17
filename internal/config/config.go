@@ -115,12 +115,6 @@ type PerformanceConfig struct {
 // the authenticated loops. Without it, one hung exit can consume the entire
 // request budget by itself, and the attempts that follow are fired against an
 // already-expired context.
-//
-// Default 60s rationale: normal first-token latencies are single-digit
-// seconds (10x headroom), while a hung attempt previously consumed the whole
-// request budget and poisoned every follow-up failover with an expired
-// context. Tailed queueing beyond 60s is possible on congested free tiers —
-// raise this if TTFT p95 approaches the bound (see ttft_p50/p95 in monitor).
 func (cfg PerformanceConfig) AttemptTimeout(requestTimeout time.Duration) time.Duration {
 	if cfg.AttemptTimeoutSeconds > 0 {
 		attempt := time.Duration(cfg.AttemptTimeoutSeconds) * time.Second
@@ -144,9 +138,9 @@ func Load(path string) (Config, error) {
 	cfg := Config{
 		Listen:      "127.0.0.1:8080",
 		Upstream:    UpstreamConfig{Zen: "https://opencode.ai/zen", Go: "https://opencode.ai/zen/go", Anonymous: "https://opencode.ai/inference"},
-		Retry:       RetryConfig{MaxAttempts: 3, TimeoutSeconds: 1800},
+		Retry:       RetryConfig{MaxAttempts: 3, TimeoutSeconds: 300},
 		Models:      ModelsConfig{RefreshSeconds: 300, Protocols: map[string]string{}},
-		Performance: PerformanceConfig{MaxIdleConns: 2048, MaxIdleConnsPerHost: 256, MaxConnsPerHost: 0, IdleConnTimeoutSeconds: 120, ConnectTimeoutSeconds: 5, FailureCooldownSeconds: 15, AttemptTimeoutSeconds: 60},
+		Performance: PerformanceConfig{MaxIdleConns: 2048, MaxIdleConnsPerHost: 256, MaxConnsPerHost: 0, IdleConnTimeoutSeconds: 120, ConnectTimeoutSeconds: 5, FailureCooldownSeconds: 15},
 		Logging:     LoggingConfig{Level: "info", RingSize: 2000},
 		WebUI:       WebUIConfig{Listen: "0.0.0.0:8081", SessionTTLMinutes: 720},
 		Prefer:      TierGo,

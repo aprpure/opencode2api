@@ -13,7 +13,7 @@
   },
   "retry": {
     "max_attempts": 3,
-    "timeout_seconds": 1800
+    "timeout_seconds": 300
   },
   "models": {
     "refresh_seconds": 300,
@@ -27,7 +27,7 @@
     "idle_conn_timeout_seconds": 120,
     "connect_timeout_seconds": 5,
     "failure_cooldown_seconds": 15,
-    "attempt_timeout_seconds": 60,
+    "attempt_timeout_seconds": 0,
     "first_event_timeout_seconds": 0
   },
   "logging": {

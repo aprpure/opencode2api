@@ -338,8 +338,8 @@ pool+http://127.0.0.1:7891
 | 字段                                    | 默认值 | 含义                                             |
 | --------------------------------------- | ------ | ------------------------------------------------ |
 | `retry.max_attempts`                    | `3`    | 每个认证 Tier 的尝试次数，包含首次请求。         |
-| `retry.timeout_seconds`                 | `1800` | 推理请求总超时，包含流式响应读取。               |
-| `performance.attempt_timeout_seconds`   | `60`   | 单次尝试的总超时；0 表示使用请求总超时。         |
+| `retry.timeout_seconds`                 | `300`  | 推理请求总超时，包含流式响应读取。               |
+| `performance.attempt_timeout_seconds`   | `0`    | 单次尝试的总超时；0 表示使用请求总超时。         |
 | `performance.connect_timeout_seconds`   | `5`    | 建立连接的超时。                                 |
 | `performance.failure_cooldown_seconds`  | `15`   | 失败冷却基数。                                   |
 | `performance.max_idle_conns`            | `2048` | 每个代理 Transport 的空闲连接上限。              |

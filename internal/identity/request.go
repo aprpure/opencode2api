@@ -57,9 +57,8 @@ func DeriveRequestIDs(r *http.Request, body map[string]any) RequestIDs {
 	session := CanonicalSessionID(signal)
 	// The upstream free tier 403s canonical prj_* project ids (2026-10-14
 	// probing) while accepting the literal "global" every official client
-	// sends. Anything non-canonical also passes, so the raw signal is kept
-	// local here and re-rendered by clientProjectID into the bare 40-hex
-	// shape the client actually sends upstream.
+	// sends. Anything non-canonical also passes, so the project header is only
+	// used as a local correlation hint and is no longer forwarded upstream.
 	projectSignal := jsonutil.FirstString(r.Header.Get("x-opencode-project"), jsonutil.StringAt(body, "metadata", "project_id"))
 	if projectSignal == "" {
 		projectSignal = "opencode2api:default-project"
