@@ -79,7 +79,7 @@ func TestCollectStreamResponseDemotesPhantomToolStop(t *testing.T) {
 // start downstream, so emitting them only confuses strict clients.
 func TestResponsesFinishDropsNamelessTool(t *testing.T) {
 	var buf bytes.Buffer
-	emitter := newBridgeStreamEmitter(&buf, nopFlusher{}, Responses, "m")
+	emitter := bridgeStreamEmitter(&buf, nopFlusher{}, Responses, "m")
 	if err := emitter.Emit(bridgeStreamEvent{Kind: "text", Text: "hi"}); err != nil {
 		t.Fatalf("emit text: %v", err)
 	}

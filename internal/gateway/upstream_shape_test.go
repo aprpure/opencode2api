@@ -10,7 +10,7 @@ import (
 )
 
 func shapeTestGateway() *Gateway {
-	return &Gateway{catalog: models.NewCatalog(config.TierZen, nil)}
+	return &Gateway{catalog: models.Catalog(config.TierZen, nil)}
 }
 
 func shapeTestRoute(model string) models.Route {
@@ -41,8 +41,8 @@ func TestShapeKeyBodyFreeVsPaid(t *testing.T) {
 		t.Fatalf("include_usage not forced: %v", payload["stream_options"])
 	}
 	tools, _ := payload["tools"].([]any)
-	if len(tools) != len(anonymousCoreTools) {
-		t.Fatalf("expected %d tools injected, got %d", len(anonymousCoreTools), len(tools))
+	if len(tools) != len(v2CoreTools) {
+		t.Fatalf("expected %d tools injected, got %d", len(v2CoreTools), len(tools))
 	}
 	names := make(map[string]bool, len(tools))
 	for _, raw := range tools {
@@ -52,7 +52,7 @@ func TestShapeKeyBodyFreeVsPaid(t *testing.T) {
 			names[name] = true
 		}
 	}
-	for _, name := range anonymousCoreTools {
+	for _, name := range v2CoreTools {
 		if !names[name] {
 			t.Fatalf("core tool %q missing from shaped body", name)
 		}

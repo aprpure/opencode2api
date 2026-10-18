@@ -8,7 +8,7 @@ import (
 )
 
 func TestIsFreeModelNameFallback(t *testing.T) {
-	catalog := NewCatalog(config.TierZen, nil)
+	catalog := Catalog(config.TierZen, nil)
 	if !catalog.IsFreeModel("muse-spark-1.3-contributor-free") {
 		t.Fatal("expected -free name to be free")
 	}
@@ -18,11 +18,11 @@ func TestIsFreeModelNameFallback(t *testing.T) {
 }
 
 func TestIsFreeModelMetadata(t *testing.T) {
-	catalog := NewCatalog(config.TierZen, nil)
+	catalog := Catalog(config.TierZen, nil)
 	zero := 0.0
 	one := 1.0
 	two := 2.0
-	catalog.SetPricingStore(&PricingStore{
+	catalog.SetPricingStore(&PricingRegistry{
 		models: map[string]Price{
 			"nameless-free-model": {ID: "nameless-free-model", Input: &zero, Output: &zero},
 			"paid-model":          {ID: "paid-model", Input: &one, Output: &two},
