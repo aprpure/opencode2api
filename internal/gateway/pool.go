@@ -23,15 +23,18 @@ import (
 )
 
 // proxyTransport is one configured proxy route, or "direct", with its own HTTP
-// client. pool marks a rotating proxy pool entry (#pool or pool+), whose
-// health is never tracked. healthy is cleared by proxy-route failures and set
-// again by upstream HTTP responses (see syncProxyResult) or a passing health
-// check; checking claims the single health check allowed in flight.
+// clients: client for regular traffic and bun for the free-model traffic that
+// goes out disguised as the Bun runtime (see Gateway.inferenceClient). pool
+// marks a rotating proxy pool entry (#pool or pool+), whose health is never
+// tracked. healthy is cleared by proxy-route failures and set again by
+// upstream HTTP responses (see syncProxyResult) or a passing health check;
+// checking claims the single health check allowed in flight.
 type proxyTransport struct {
 	index    int
 	name     string
 	pool     bool
 	client   *http.Client
+	bun      *http.Client
 	healthy  atomic.Bool
 	checking atomic.Bool
 }
@@ -260,11 +263,13 @@ func (p *proxyTransports) healthCounts() (total, healthy int) {
 	return len(p.items), healthy
 }
 
-// transportPool builds one HTTP client per configured proxy entry, each
-// starting healthy, with responseHeaderTimeout as its header wait. A #pool
-// entry gets an HTTP/1.1 transport without keep-alives, so every attempt opens
-// a new connection through the pool; "direct" dials the upstream without any
-// proxy, ignoring the proxy environment variables.
+// transportPool builds the HTTP clients of every configured proxy entry, each
+// entry starting healthy: a regular client and a Bun-disguised one
+// (httpx.BunTransport) sharing the proxy, connect timeout, idle settings and
+// responseHeaderTimeout as their header wait. A #pool entry gets HTTP/1.1
+// transports without keep-alives, so every attempt opens a new connection
+// through the pool; "direct" dials the upstream without any proxy, ignoring
+// the proxy environment variables.
 func transportPool(proxies []string, cfg config.PerformanceConfig, responseHeaderTimeout time.Duration) (*proxyTransports, error) {
 	p := &proxyTransports{items: make([]*proxyTransport, 0, len(proxies))}
 	for _, raw := range proxies {
@@ -296,6 +301,7 @@ func transportPool(proxies []string, cfg config.PerformanceConfig, responseHeade
 			Timeout:   time.Duration(cfg.ConnectTimeoutSeconds) * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext
+		var proxyURL *url.URL
 		if clean == "direct" {
 			transport.Proxy = nil
 		} else {
@@ -304,8 +310,20 @@ func transportPool(proxies []string, cfg config.PerformanceConfig, responseHeade
 				return nil, fmt.Errorf("parse proxy %s: %w", config.RedactURL(raw), err)
 			}
 			transport.Proxy = http.ProxyURL(u)
+			proxyURL = u
 		}
-		proxy := &proxyTransport{index: len(p.items), name: raw, pool: isPool, client: &http.Client{Transport: transport}}
+		bun, err := httpx.NewBunTransport(httpx.BunOptions{
+			Proxy:                 proxyURL,
+			ConnectTimeout:        time.Duration(cfg.ConnectTimeoutSeconds) * time.Second,
+			ResponseHeaderTimeout: responseHeaderTimeout,
+			IdleConnTimeout:       transport.IdleConnTimeout,
+			MaxIdleConnsPerHost:   cfg.MaxIdleConnsPerHost,
+			DisableKeepAlives:     isPool,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("proxy %s: %w", config.RedactURL(raw), err)
+		}
+		proxy := &proxyTransport{index: len(p.items), name: raw, pool: isPool, client: &http.Client{Transport: transport}, bun: &http.Client{Transport: bun}}
 		proxy.healthy.Store(true)
 		p.items = append(p.items, proxy)
 	}
