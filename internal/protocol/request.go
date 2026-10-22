@@ -26,14 +26,6 @@ func PrepareRequest(from, to Protocol, input map[string]any, upstreamURL string)
 		jsonutil.Put(output, "max_output_tokens", floorResponsesMaxTokens(output["max_output_tokens"]))
 	}
 	normalizeToolReasoningHistory(to, jsonutil.StringAt(output, "model"), upstreamURL, output)
-	// Same-protocol requests are cloned rather than bridged, so the effort
-	// ladder is applied here too: a client that posts reasoning.effort
-	// straight to /v1/responses needs the same translation as one arriving
-	// from Anthropic. Scoped to the Responses target on purpose: a
-	// Chat-native model that does implement "max" must keep it.
-	if to == Responses {
-		clampResponsesBody(output)
-	}
 	return output, nil
 }
 
@@ -89,7 +81,7 @@ func ForcedEffort(protocol Protocol, body map[string]any, effort string) {
 			reasoning = map[string]any{}
 			body["reasoning"] = reasoning
 		}
-		reasoning["effort"] = clampResponsesEffort(effort)
+		reasoning["effort"] = effort
 	}
 }
 
@@ -918,51 +910,6 @@ func missingToolIDs(order []string, pending map[string]bool) []string {
 	return missing
 }
 
-// responsesEffortLadder maps an Anthropic reasoning level onto the nearest
-// level a Responses target accepts. OpenAI's Responses ladder stops at
-// "xhigh"; Anthropic adds "max" above it. Forwarding "max" verbatim is
-// rejected with a generic invalid_request_error (verified against the
-// muse-spark Responses models), so it is translated to the top rung the
-// target actually implements instead of failing the request.
-//
-// A level the Responses API does define is passed through untouched, and an
-// unrecognized level is left alone so the upstream, not the gateway, decides
-// whether it is valid for that model.
-var responsesEffortLadder = map[string]string{
-	"max": "xhigh",
-}
-
-// clampResponsesEffort projects an effort onto the Responses ladder. The
-// result keeps the caller's casing unless a translation applies, so a level
-// the target accepts is forwarded byte-identically.
-func clampResponsesEffort(effort any) any {
-	text, ok := effort.(string)
-	if !ok {
-		return effort
-	}
-	if mapped, ok := responsesEffortLadder[strings.ToLower(strings.TrimSpace(text))]; ok {
-		return mapped
-	}
-	return effort
-}
-
-// clampResponsesBody applies clampResponsesEffort to a prepared Responses body.
-// It runs for pass-through requests too, which never reach the bridge, so a
-// client that posts reasoning.effort "max" straight to /v1/responses is
-// translated the same way as one arriving from Anthropic.
-func clampResponsesBody(body map[string]any) {
-	if body == nil {
-		return
-	}
-	reasoning, ok := body["reasoning"].(map[string]any)
-	if !ok {
-		return
-	}
-	if effort, ok := reasoning["effort"]; ok {
-		reasoning["effort"] = clampResponsesEffort(effort)
-	}
-}
-
 // responsesReasoning builds the Responses "reasoning" object. A nil result
 // omits the field.
 //
@@ -988,12 +935,11 @@ func responsesReasoning(value any) any {
 		if effort := reasoningEffort(object); effort != nil {
 			switch typed := effort.(type) {
 			case string:
-				return map[string]any{"effort": clampResponsesEffort(typed)}
+				return map[string]any{"effort": typed}
 			case map[string]any:
-				clampResponsesBody(typed)
 				return typed
 			default:
-				return map[string]any{"effort": clampResponsesEffort(typed)}
+				return map[string]any{"effort": typed}
 			}
 		}
 		return object
@@ -1004,11 +950,10 @@ func responsesReasoning(value any) any {
 			if effort == nil {
 				return nil
 			}
-			return map[string]any{"effort": clampResponsesEffort(effort)}
+			return map[string]any{"effort": effort}
 		}
-		return map[string]any{"effort": clampResponsesEffort(typed)}
+		return map[string]any{"effort": typed}
 	case map[string]any:
-		clampResponsesBody(typed)
 		return typed
 	default:
 		return value
