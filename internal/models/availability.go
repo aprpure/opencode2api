@@ -204,6 +204,26 @@ func (s *AvailabilityRegistry) Record(model string, generation uint64, success b
 	return s.saveLocked()
 }
 
+// Defer postpones the next automatic probe of model without changing its
+// availability record. A probe that could not reach a verdict (the free tier's
+// account-wide usage cap answered, for one) must not overwrite what the last
+// real probe learned, and it must not leave NextCheck in the past either: the
+// scheduler would then re-probe on every tick.
+func (s *AvailabilityRegistry) Defer(model string, generation uint64, next, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item := s.items[model]
+	if item.Generation != generation || item.Manual {
+		return nil
+	}
+	item.Model = model
+	item.CheckedAt = now
+	item.NextCheck = next
+	item.ProbeVersion = 1
+	s.items[model] = item
+	return s.saveLocked()
+}
+
 // saveLocked rewrites the registry file through a temporary file and a rename.
 // It is a no-op without a path. The caller holds s.mu for writing.
 func (s *AvailabilityRegistry) saveLocked() error {

@@ -288,6 +288,23 @@ func (g *Gateway) refreshAnonymousTier(ctx context.Context, base string) []strin
 			g.anonymous.NoteSuccess()
 			return models
 		}
+		if status == http.StatusTooManyRequests {
+			// The free tier's account-wide cap answered. Every exit shares it,
+			// and a catalog refresh is not evidence against this exit, so cool
+			// the lane briefly and keep the previous list instead of blaming
+			// the proxy and logging a lane failure.
+			g.anonymous.CooldownForUsage(freeUsageLimitCooldown)
+			g.anonymous.NoteNeutral()
+			g.logger.Info("anonymous model catalog refresh deferred; free tier usage cap reached", "component", "models", "event", "anonymous_refresh_rate_limited", "upstream", config.RedactURL(base))
+			return nil
+		}
+		if status > 0 {
+			// The route answered, so the exit itself is healthy: an upstream
+			// status is not evidence against it, and another exit gets the next
+			// attempt without this one being cooled.
+			g.logger.Debug("anonymous model catalog refresh rejected", "component", "models", "event", "anonymous_refresh_attempt_rejected", "upstream", config.RedactURL(base), "attempt", attempt, "status", status, "error", err)
+			continue
+		}
 		g.anonymous.MarkFailure(node, nil, err)
 		g.logger.Debug("anonymous model catalog refresh attempt failed", "component", "models", "event", "anonymous_refresh_attempt_failed", "upstream", config.RedactURL(base), "attempt", attempt, "proxy", config.RedactURL(node.proxy.name), "error", err)
 	}

@@ -22,8 +22,12 @@ import (
 // "zen") that produced it, and the effort observation to store.
 type probeResult struct {
 	success, attempted, effortRejected bool
-	reason, channel                    string
-	effort                             models.EffortProbe
+	// rateLimited reports that the free tier's account-wide usage cap answered.
+	// A cap says nothing about the model or the lane, so the caller must not
+	// record it as an availability result.
+	rateLimited     bool
+	reason, channel string
+	effort          models.EffortProbe
 }
 
 // resolvedEffort returns the reasoning effort to force on a request for model:
@@ -131,6 +135,7 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 		result.reason = "anonymous_paused"
 	}
 	inconclusive := ""
+	rateLimited := false
 	for _, lane := range lanes {
 		if ctx.Err() != nil {
 			return probeResult{reason: "canceled"}
@@ -174,6 +179,10 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 			}
 			return result
 		}
+		if result.rateLimited {
+			rateLimited = true
+			continue
+		}
 		if result.reason != "model_unavailable" {
 			inconclusive = result.reason
 		}
@@ -181,6 +190,12 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 	// One lane's auth/transient failure cannot establish global unavailability.
 	if inconclusive != "" {
 		result.reason = inconclusive
+	}
+	if rateLimited && !result.success {
+		// The cap is shared by every lane, so it is the honest reason to
+		// report, and the caller must not treat it as an availability result.
+		result.reason = "rate_limited"
+		result.rateLimited = true
 	}
 	return result
 }
@@ -223,6 +238,12 @@ func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, base
 			// reading another anonymous "http_403".
 			if isNetworkAbuseBlock(resp.StatusCode, body) {
 				return probeResult{attempted: true, reason: "network_abuse_blocked"}
+			}
+			// The account-wide usage cap is not evidence about the model: report
+			// it so the caller can skip recording instead of showing the model
+			// as unavailable.
+			if isFreeUsageLimit(resp.StatusCode, body) {
+				return probeResult{attempted: true, reason: "rate_limited", rateLimited: true}
 			}
 			result.effortRejected = isEffortRejection(resp.StatusCode, string(body))
 			if isModelUnavailable(resp.StatusCode, string(body)) {
