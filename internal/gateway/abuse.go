@@ -100,6 +100,22 @@ func peekNetworkAbuseBlock(resp *http.Response) bool {
 	return isNetworkAbuseBlock(resp.StatusCode, peekResponseBody(resp))
 }
 
+// isFreeTierShapeRejection reports whether a 403 is the free tier's request
+// gate: the lane answered, but this body is not the shape it accepts. An
+// auxiliary request (title, summary) is the usual cause: the gate wants it
+// without tools, and rejects it the moment one is injected. Unlike an IP block,
+// the same exit can serve the request once the body is corrected.
+func isFreeTierShapeRejection(status int, body []byte) bool {
+	if status != http.StatusForbidden || isNetworkAbuseBlock(status, body) {
+		return false
+	}
+	text := strings.ToLower(string(body))
+	return strings.Contains(text, "freetiererror") ||
+		strings.Contains(text, "free tier error") ||
+		strings.Contains(text, "free tier can only be used") ||
+		strings.Contains(text, "only be used from within opencode")
+}
+
 // errDeterministicClientRejection reports that the upstream rejected the
 // request itself: the body is malformed, too long for the model, or fails the
 // same validation on every credential. Retrying on another key, lane or tier

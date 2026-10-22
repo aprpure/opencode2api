@@ -62,6 +62,52 @@ func TestAnonymousRequestMatchesCapture(t *testing.T) {
 	}
 }
 
+// The gate requires one tool name and does not compare definitions, so the
+// gateway injects a single read tool. An auxiliary request (no tools at all)
+// keeps a bare fallback: the gate rejects it once a tool appears.
+func TestPrepareAnonymousBodyTools(t *testing.T) {
+	shaped, alias, bare := prepareAnonymousBody([]byte(`{"model":"m","stream":true}`), wire.Chat)
+	if alias != "" {
+		t.Fatalf("alias = %q, want empty", alias)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(shaped, &payload); err != nil {
+		t.Fatalf("unmarshal shaped: %v", err)
+	}
+	tools, _ := payload["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("shaped body carries %d tools, want the single read tool", len(tools))
+	}
+	if bare == nil {
+		t.Fatal("a request without tools must keep a bare fallback")
+	}
+	var barePayload map[string]any
+	if err := json.Unmarshal(bare, &barePayload); err != nil {
+		t.Fatalf("unmarshal bare: %v", err)
+	}
+	if _, exists := barePayload["tools"]; exists {
+		t.Fatalf("bare fallback must not carry tools: %v", barePayload["tools"])
+	}
+
+	// A request that already declares tools has no bare fallback: dropping them
+	// would change what the client asked for.
+	if _, _, bare = prepareAnonymousBody([]byte(`{"model":"m","tools":[{"type":"function","function":{"name":"Read"}}]}`), wire.Chat); bare != nil {
+		t.Fatalf("a tool-bearing request must not keep a bare fallback: %q", bare)
+	}
+}
+
+// A 403 FreeTierError is the shape gate, not an IP abuse block.
+func TestFreeTierErrorClassification(t *testing.T) {
+	shape := []byte(`{"type":"error","error":{"type":"FreeTierError","message":"Free tier can only be used from within OpenCode"}}`)
+	if !isFreeTierShapeRejection(403, shape) {
+		t.Error("FreeTierError must classify as a shape rejection")
+	}
+	abuse := []byte("Forbidden, OpenCode Free Model Gateway Detect Abuse Traffic")
+	if isFreeTierShapeRejection(403, abuse) {
+		t.Error("an IP abuse block is not a shape rejection")
+	}
+}
+
 // The catalog's reasoning_options is the only authority on which effort levels
 // a model implements: the same "max" is valid for deepseek-v4.1-flash-free and
 // rejected by muse-spark, and "xhigh" is the other way round.

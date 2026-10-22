@@ -391,10 +391,14 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	protocol := route.ProtocolFor(config.TierZen)
 	upstreams := g.anonymousUpstreams()
 	preparedBodies := make([][]byte, len(upstreams))
+	// bareBodies holds the same request without any tool injected, for the
+	// auxiliary (title, summary) shape only; see prepareAnonymousBody.
+	bareBodies := make([][]byte, len(upstreams))
 	toolAliases := make([]string, len(upstreams))
 	for i := range upstreams {
-		preparedBodies[i], toolAliases[i] = prepareAnonymousBody(rawBody, protocol)
+		preparedBodies[i], toolAliases[i], bareBodies[i] = prepareAnonymousBody(rawBody, protocol)
 		preparedBodies[i] = g.alignEffort(route.ID, config.TierZen, protocol, preparedBodies[i])
+		bareBodies[i] = g.alignEffort(route.ID, config.TierZen, protocol, bareBodies[i])
 	}
 	for proxies < limit {
 		if ctx.Err() != nil {
@@ -435,17 +439,38 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 				httpx.DrainAndClose(lastResponse.Body)
 				lastResponse = nil
 			}
-			req, err := upstreamRequest(ctx, baseURL, protocol, preparedBodies[index], ids, anonymousZenKey, true)
-			if err != nil {
+			send := func(body []byte) (*http.Response, error, time.Duration) {
+				req, err := upstreamRequest(ctx, baseURL, protocol, body, ids, anonymousZenKey, true)
+				if err != nil {
+					return nil, err, 0
+				}
+				if node.proxy.pool {
+					req.Close = true
+				}
+				setRequestCredential(ctx, config.TierZen, "anonymous", "anonymous", true, node.proxy)
+				started := time.Now()
+				resp, err := doInferenceAttempt(g.inferenceClient(node.proxy, baseURL, route.ID), req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second, g.attemptTimeout)
+				return resp, err, time.Since(started)
+			}
+			resp, err, duration := send(preparedBodies[index])
+			if err != nil && resp == nil && duration == 0 {
 				return nil, err, attempts
 			}
-			if node.proxy.pool {
-				req.Close = true
+			if resp != nil && bareBodies[index] != nil && ctx.Err() == nil &&
+				isFreeTierShapeRejection(resp.StatusCode, peekResponseBody(resp)) {
+				// An auxiliary request (title, summary) reaches the gate bare.
+				// Injecting the read tool turns it into an agent request the
+				// gate rejects, so retry this exit once without the tool instead
+				// of guessing the request kind from its prompt.
+				g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, node.proxy, resp, nil, duration)
+				httpx.DrainAndClose(resp.Body)
+				attempts++
+				if meta := telemetry.MetaFromContext(ctx); meta != nil {
+					meta.Attempts = attemptOffset + attempts
+				}
+				g.logger.Debug("free tier rejected the tool-shaped body; retrying it bare", "component", "upstream", "event", "free_tier_shape_retry", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL))
+				resp, err, duration = send(bareBodies[index])
 			}
-			setRequestCredential(ctx, config.TierZen, "anonymous", "anonymous", true, node.proxy)
-			started := time.Now()
-			resp, err := doInferenceAttempt(g.inferenceClient(node.proxy, baseURL, route.ID), req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second, g.attemptTimeout)
-			duration := time.Since(started)
 			if ctx.Err() != nil {
 				// The parent budget expired while this attempt was in flight. Its
 				// outcome says nothing about this proxy, so record nothing and stop
@@ -598,15 +623,21 @@ const v1DeprecatedReadDescription = "DEPRECATED: This tool is deprecated and dis
 // the gate requires, alongside the original client tool name that was aliased
 // to "read" so the gateway can restore it in the downstream response.
 //
+// The third result is the same body without any tool injection, returned only
+// for a request that declared no tools at all. Such a request is an auxiliary
+// one (title, summary): the official client sends it bare, and the gate rejects
+// it as soon as a tool appears. The caller keeps the bare body as a one-shot
+// fallback for the gate's 403 instead of guessing from the prompt text.
+//
 // System One payloads are decision requests, not agent traffic, so they are
 // forwarded verbatim, as is a body that is not a JSON object.
-func prepareAnonymousBody(body []byte, protocol wire.Protocol) ([]byte, string) {
+func prepareAnonymousBody(body []byte, protocol wire.Protocol) ([]byte, string, []byte) {
 	if protocol == wire.SystemOne {
-		return body, ""
+		return body, "", nil
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return body, ""
+		return body, "", nil
 	}
 	changed := false
 	if streaming, ok := payload["stream"].(bool); !ok || !streaming {
@@ -616,20 +647,34 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol) ([]byte, string) 
 	if ensureAnonymousChatUsage(payload, protocol) {
 		changed = true
 	}
+	_, hadTools := payload["tools"]
+	// bare is the body as the stream/usage normalization leaves it: no tool
+	// injected yet. Only an auxiliary request keeps it as a fallback.
+	bare := body
+	if changed {
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return body, "", nil
+		}
+		bare = encoded
+	}
 	alias, toolChanged := ensureV1ReadTool(payload, protocol)
 	if toolChanged {
 		changed = true
 	}
 	if !changed {
-		return body, alias
+		return body, alias, nil
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		// The alias is dropped with the failed re-encode: the body never left
 		// the gateway, so there is nothing downstream to restore.
-		return body, ""
+		return body, "", nil
 	}
-	return encoded, alias
+	if hadTools {
+		return encoded, alias, nil
+	}
+	return encoded, alias, bare
 }
 
 // ensureAnonymousChatUsage keeps token usage available when a non-streaming
@@ -896,7 +941,7 @@ func (g *Gateway) shapeKeyBody(body []byte, route models.Route, tier config.Tier
 	if !g.catalog.IsFreeModel(route.ID) {
 		return body, "", false
 	}
-	shaped, alias := prepareAnonymousBody(body, route.ProtocolFor(tier))
+	shaped, alias, _ := prepareAnonymousBody(body, route.ProtocolFor(tier))
 	shaped = g.alignEffort(route.ID, tier, route.ProtocolFor(tier), shaped)
 	return shaped, alias, !bytes.Equal(shaped, body)
 }
