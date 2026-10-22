@@ -251,8 +251,16 @@ func (g *Gateway) refreshZen(ctx context.Context) []string {
 // node per attempt: one pass over the nodes, or up to retry.max_attempts
 // attempts when #pool transports exist. base only labels the logs.
 func (g *Gateway) refreshAnonymousTier(ctx context.Context, base string) []string {
+	if !g.anonymous.AllowAttempt() {
+		// The breaker is open, or its half-open probe is already running:
+		// refreshing now would only add to the block. Keeping nil leaves the
+		// previous catalog in place.
+		g.logger.Debug("anonymous model catalog refresh skipped; circuit breaker is not closed", "component", "models", "event", "anonymous_refresh_paused", "upstream", config.RedactURL(base))
+		return nil
+	}
+	defer g.anonymous.ReleaseProbe()
 	cursor := g.anonymous.CursorFor("")
-	limit := g.anonymous.Len()
+	limit := min(g.anonymous.Len(), g.maxAnonymousExits())
 	if g.anonymous.HasPool() && g.cfg.Retry.MaxAttempts > limit {
 		limit = g.cfg.Retry.MaxAttempts
 	}
@@ -265,8 +273,8 @@ func (g *Gateway) refreshAnonymousTier(ctx context.Context, base string) []strin
 		var models []string
 		var status int
 		var err error
-		// List models on the v1 origin first, then fall back to the
-		// configured v2 /inference origin (see anonymousUpstreams).
+		// List models on the configured v2 /inference origin first, then fall
+		// back to the v1 origin (see anonymousUpstreams).
 		for _, upstream := range g.anonymousUpstreams() {
 			models, status, err = modelcatalog.FetchModels(refreshCtx, node.proxy.client, upstream, anonymousZenKey)
 			if err == nil || isProxyFailure(err) {
@@ -277,6 +285,7 @@ func (g *Gateway) refreshAnonymousTier(ctx context.Context, base string) []strin
 		cancel()
 		if err == nil {
 			g.anonymous.MarkSuccess(node)
+			g.anonymous.NoteSuccess()
 			return models
 		}
 		g.anonymous.MarkFailure(node, nil, err)
