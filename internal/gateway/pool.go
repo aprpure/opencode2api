@@ -82,6 +82,11 @@ type anonymousNodes struct {
 	breakerStrikes atomic.Int32
 	consecutive    atomic.Int32
 	probing        atomic.Bool
+	// usageUntil is the short stand-down after the upstream answered 429
+	// FreeUsageLimitError. It is deliberately separate from breakerUntil: the
+	// cap is account-wide and short-lived, so the lane pauses for a fixed
+	// window without counting a strike or doubling the backoff.
+	usageUntil atomic.Int64
 }
 
 type anonymousBackoff struct {
@@ -174,7 +179,13 @@ func (p *anonymousNodes) CursorFor(affinity string) anonymousCursor {
 // again; every winner must release the probe through NoteSuccess, NoteFailure,
 // NoteNeutral or ReleaseProbe.
 func (p *anonymousNodes) AllowAttempt() bool {
-	if p == nil || p.backoff.threshold < 1 {
+	if p == nil {
+		return true
+	}
+	if p.UsageCoolingDown(time.Now()) {
+		return false
+	}
+	if p.backoff.threshold < 1 {
 		return true
 	}
 	until := p.breakerUntil.Load()
@@ -229,6 +240,28 @@ func (p *anonymousNodes) NoteNeutral() {
 	p.consecutive.Store(0)
 	p.breakerUntil.Store(0)
 	p.probing.Store(false)
+}
+
+// CooldownForUsage stands the lane down for d after the upstream answered
+// 429 FreeUsageLimitError and reports the applied window. The cooldown is
+// independent of the breaker's strike counter: the cap is not evidence of an
+// outage, and it lifts on its own.
+func (p *anonymousNodes) CooldownForUsage(d time.Duration) time.Duration {
+	if p == nil || d <= 0 {
+		return 0
+	}
+	p.usageUntil.Store(time.Now().Add(d).UnixNano())
+	return d
+}
+
+// UsageCoolingDown reports whether the lane is inside a FreeUsageLimitError
+// cooldown. It never opens the breaker and never consumes a half-open probe.
+func (p *anonymousNodes) UsageCoolingDown(now time.Time) bool {
+	if p == nil {
+		return false
+	}
+	until := p.usageUntil.Load()
+	return until != 0 && now.UnixNano() < until
 }
 
 // NoteFailure records one failed attempt. It reports the pause window when the

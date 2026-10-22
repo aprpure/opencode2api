@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"opencode2api/internal/config"
 	"opencode2api/internal/identity"
@@ -96,8 +97,33 @@ func TestPrepareAnonymousBodyTools(t *testing.T) {
 	}
 }
 
-// A 403 FreeTierError is the shape gate, not an IP abuse block.
+// A usage cap stands the lane down without tripping the breaker, so a short
+// quota window does not turn into an hour-scale outage.
+func TestAnonymousUsageCooldown(t *testing.T) {
+	p := &anonymousNodes{backoff: anonymousBackoff{threshold: 1, base: time.Minute, max: time.Hour}}
+	if !p.AllowAttempt() {
+		t.Fatal("a fresh lane must allow attempts")
+	}
+	if pause := p.CooldownForUsage(time.Minute); pause != time.Minute {
+		t.Fatalf("cooldown = %v, want 1m", pause)
+	}
+	if p.AllowAttempt() {
+		t.Fatal("a usage cooldown must pause the lane")
+	}
+	if p.Open() {
+		t.Fatal("a usage cooldown must not open the breaker")
+	}
+}
+
+// The 429 FreeUsageLimitError is neither an IP block nor a shape rejection.
 func TestFreeTierErrorClassification(t *testing.T) {
+	usage := []byte(`{"type":"error","error":{"type":"FreeUsageLimitError","message":"Free usage limit reached"}}`)
+	if !isFreeUsageLimit(429, usage) {
+		t.Error("FreeUsageLimitError must classify as a usage limit")
+	}
+	if isFreeTierShapeRejection(429, usage) {
+		t.Error("a usage limit is not a shape rejection")
+	}
 	shape := []byte(`{"type":"error","error":{"type":"FreeTierError","message":"Free tier can only be used from within OpenCode"}}`)
 	if !isFreeTierShapeRejection(403, shape) {
 		t.Error("FreeTierError must classify as a shape rejection")

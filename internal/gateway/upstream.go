@@ -358,6 +358,12 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	// The breaker holds the lane shut for an hour-scale window after repeated
 	// failures: poking a flagged upstream again would only extend the block.
 	if !g.anonymous.AllowAttempt() {
+		// A usage-cap cooldown is not a breaker trip: report the cap so the
+		// client backs off for the right reason instead of reading a paused
+		// lane into a broken gateway.
+		if g.anonymous.UsageCoolingDown(time.Now()) {
+			return nil, errFreeUsageLimited, 0
+		}
 		return nil, errAnonymousLanePaused, 0
 	}
 	defer g.anonymous.ReleaseProbe()
@@ -371,6 +377,10 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	// then reports errDeterministicClientRejection so the caller keeps this
 	// 4xx instead of replacing it with a later tier's answer.
 	halted := false
+	// quotaLimited records that the free tier's usage cap answered: the lane
+	// cools down for a short window and the walk stops without tripping the
+	// breaker.
+	quotaLimited := false
 	cursor := g.anonymous.CursorFor(ids.Session)
 	limit := min(g.anonymous.Len(), g.maxAnonymousExits())
 	if g.anonymous.HasPool() && g.cfg.Retry.MaxAttempts > limit {
@@ -506,6 +516,16 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 				blocked = true
 				g.logger.Warn("free tier blocked the egress IP; cooling the exit", "component", "upstream", "event", "free_tier_ip_blocked", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "proxy", config.RedactURL(node.proxy.name), "block_for", g.freeTierBlockTTL().String())
 				break
+			} else if isFreeUsageLimit(resp.StatusCode, peekResponseBody(resp)) {
+				// The free tier's account-wide usage cap answered. Every exit
+				// shares it, so walking the pool only burns attempts: stand the
+				// lane down for a short, fixed window and stop scanning.
+				pause := g.anonymous.CooldownForUsage(freeUsageLimitCooldown)
+				g.anonymous.NoteNeutral()
+				lastErr = errFreeUsageLimited
+				quotaLimited = true
+				g.logger.Warn("free tier usage limit reached; cooling the anonymous lane", "component", "upstream", "event", "free_usage_limit", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "cooldown", pause.String())
+				break
 			} else if isDeterministicClientResponse(resp.StatusCode, peekResponseBody(resp)) {
 				// The request is too long, malformed, or otherwise invalid on
 				// every lane. Stop here and hand this 4xx to the client.
@@ -520,11 +540,11 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 				break
 			}
 		}
-		if halted {
-			// A request-level rejection is identical on every exit: another
-			// proxy cannot shorten the context or repair the payload. Keep the
-			// response and let the caller forward it instead of sending the
-			// same request through every remaining exit.
+		if halted || quotaLimited {
+			// A request-level rejection is identical on every exit, and the
+			// usage cap is shared by every exit: another proxy cannot change
+			// either answer. Keep the response and let the caller forward it
+			// instead of sending the same request through every remaining exit.
 			g.anonymous.NoteNeutral()
 			break
 		}

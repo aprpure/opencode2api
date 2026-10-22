@@ -40,6 +40,24 @@ const anonymousLanePausedMessage = "The anonymous free tier is paused after repe
 // without a restart.
 const freeTierBlockTTL = 15 * time.Minute
 
+// errFreeUsageLimited reports that the free tier's account-wide usage cap
+// answered 429 FreeUsageLimitError. It is neither an IP block nor a
+// request-shape rejection: every exit shares the same cap, so walking the pool
+// only burns attempts, and the lane should step aside for a short, fixed
+// cooldown instead of the hour-scale breaker.
+var errFreeUsageLimited = errors.New("free tier usage limit reached")
+
+// freeUsageLimitedMessage is what a client receives while the free tier's
+// account-wide usage cap is exhausted. The upstream wording points at a paid
+// plan; this one names the cause and the two ways forward.
+const freeUsageLimitedMessage = "OpenCode's free tier usage cap is exhausted for this gateway. Wait for the cap to reset, or configure an authenticated key tier."
+
+// freeUsageLimitCooldown is how long the anonymous lane stands down after a
+// FreeUsageLimitError. Upstream does not publish the window; the cap is
+// short-lived (minutes), so a fixed pause keeps the lane from hammering it
+// while still recovering without operator action.
+const freeUsageLimitCooldown = 45 * time.Second
+
 // freeTierBlockTTL returns the backoff applied to an exit the free tier flagged.
 func (g *Gateway) freeTierBlockTTL() time.Duration {
 	if g != nil && g.freeTierBlock > 0 {
@@ -114,6 +132,18 @@ func isFreeTierShapeRejection(status int, body []byte) bool {
 		strings.Contains(text, "free tier error") ||
 		strings.Contains(text, "free tier can only be used") ||
 		strings.Contains(text, "only be used from within opencode")
+}
+
+// isFreeUsageLimit reports whether status and body are the free tier's
+// account-wide usage cap: a 429 carrying FreeUsageLimitError. The body names the
+// cap instead of a rate window, so it is distinct from an ordinary 429 and from
+// the IP abuse block.
+func isFreeUsageLimit(status int, body []byte) bool {
+	if status != http.StatusTooManyRequests {
+		return false
+	}
+	text := strings.ToLower(string(body))
+	return strings.Contains(text, "freeusagelimiterror") || strings.Contains(text, "free usage limit")
 }
 
 // errDeterministicClientRejection reports that the upstream rejected the

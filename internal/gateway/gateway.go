@@ -351,6 +351,13 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 				wire.WriteError(w, external, http.StatusServiceUnavailable, freeTierBlockedMessage, "free_tier_ip_blocked", ids.Request)
 				return
 			}
+			// The free tier's account-wide usage cap is exhausted. A 502 would
+			// read as a transient fault and invite a retry into the same cap,
+			// and the circuit-breaker message would misname the cause.
+			if errors.Is(err, errFreeUsageLimited) {
+				wire.WriteError(w, external, http.StatusTooManyRequests, freeUsageLimitedMessage, "free_usage_limit", ids.Request)
+				return
+			}
 			// The anonymous lane's circuit breaker is open. Report the pause
 			// distinctly so the operator does not look for a credential or a
 			// model problem in the upstream error.
