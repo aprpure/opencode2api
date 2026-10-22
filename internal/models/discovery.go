@@ -64,13 +64,27 @@ type capabilityProvider struct {
 }
 
 type capabilityModel struct {
-	ID               string                     `json:"id"`
-	Provider         *capabilityModelProvider   `json:"provider"`
-	Limit            *capabilityModelLimit      `json:"limit"`
-	Reasoning        bool                       `json:"reasoning"`
-	ToolCall         bool                       `json:"tool_call"`
-	StructuredOutput bool                       `json:"structured_output"`
-	Modalities       *capabilityModelModalities `json:"modalities"`
+	ID               string                      `json:"id"`
+	Provider         *capabilityModelProvider    `json:"provider"`
+	Limit            *capabilityModelLimit       `json:"limit"`
+	Reasoning        bool                        `json:"reasoning"`
+	ReasoningOptions []capabilityReasoningOption `json:"reasoning_options"`
+	ToolCall         bool                        `json:"tool_call"`
+	StructuredOutput bool                        `json:"structured_output"`
+	Modalities       *capabilityModelModalities  `json:"modalities"`
+}
+
+// capabilityReasoningOption is one entry of a model's reasoning_options: a
+// "toggle" (reasoning on/off), an "effort" ladder naming the levels the model
+// implements, or a "budget_tokens" range. Only the effort ladder constrains the
+// value a Chat "reasoning_effort" or a Responses "reasoning.effort" may carry,
+// and the ladders differ per model (deepseek-v4.1-flash-free offers low/high/max
+// while muse-spark offers minimal/low/medium/high/xhigh), so the catalog, not a
+// global ladder, decides which levels a request may name.
+type capabilityReasoningOption struct {
+	Type   string   `json:"type"`
+	Values []string `json:"values"`
+	Min    *int     `json:"min"`
 }
 
 type capabilityModelModalities struct {
@@ -89,10 +103,14 @@ type capabilityModelLimit struct {
 // windows and feature flags from the catalog instead of guessing. It is
 // purely additive: routing does not depend on any of these fields.
 type Metadata struct {
-	ContextWindow    int      `json:"context_window,omitempty"`
-	MaxInput         int      `json:"max_input,omitempty"`
-	MaxOutput        int      `json:"max_output,omitempty"`
-	Reasoning        bool     `json:"reasoning,omitempty"`
+	ContextWindow int  `json:"context_window,omitempty"`
+	MaxInput      int  `json:"max_input,omitempty"`
+	MaxOutput     int  `json:"max_output,omitempty"`
+	Reasoning     bool `json:"reasoning,omitempty"`
+	// ReasoningEfforts lists the effort levels the model publishes, in the
+	// order the catalog states them. Empty means the catalog named no effort
+	// ladder, so the gateway must not second-guess the client's level.
+	ReasoningEfforts []string `json:"reasoning_efforts,omitempty"`
 	ToolCall         bool     `json:"tool_call,omitempty"`
 	StructuredOutput bool     `json:"structured_output,omitempty"`
 	InputModalities  []string `json:"input_modalities,omitempty"`
@@ -125,6 +143,11 @@ func (m *capabilityModel) metadata() Metadata {
 		md.ContextWindow = m.Limit.Context
 		md.MaxInput = m.Limit.Input
 		md.MaxOutput = m.Limit.Output
+	}
+	for _, option := range m.ReasoningOptions {
+		if option.Type == "effort" && len(option.Values) > 0 {
+			md.ReasoningEfforts = option.Values
+		}
 	}
 	return md
 }

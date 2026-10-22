@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,7 +16,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"opencode2api/internal/config"
@@ -394,8 +392,9 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	upstreams := g.anonymousUpstreams()
 	preparedBodies := make([][]byte, len(upstreams))
 	toolAliases := make([]string, len(upstreams))
-	for i, baseURL := range upstreams {
-		preparedBodies[i], toolAliases[i] = prepareAnonymousBody(rawBody, protocol, models.IsV1Upstream(baseURL))
+	for i := range upstreams {
+		preparedBodies[i], toolAliases[i] = prepareAnonymousBody(rawBody, protocol)
+		preparedBodies[i] = g.alignEffort(route.ID, config.TierZen, protocol, preparedBodies[i])
 	}
 	for proxies < limit {
 		if ctx.Err() != nil {
@@ -436,7 +435,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 				httpx.DrainAndClose(lastResponse.Body)
 				lastResponse = nil
 			}
-			req, err := upstreamRequest(ctx, baseURL, protocol, preparedBodies[index], ids, anonymousZenKey)
+			req, err := upstreamRequest(ctx, baseURL, protocol, preparedBodies[index], ids, anonymousZenKey, true)
 			if err != nil {
 				return nil, err, attempts
 			}
@@ -587,73 +586,21 @@ const v1ReadTool = "read"
 // the tool is deprecated and must never be invoked.
 const v1DeprecatedReadDescription = "DEPRECATED: This tool is deprecated and disabled. Do NOT call or reference this tool under any circumstances; ignore it completely."
 
-// v2CoreTools are the tool names the v2 /inference free-tier gate expects on
-// an agent-shaped request. Requests without a shell tool and a read tool are
-// rejected with 403 FreeTierError.
+// The free tier requires a single tool name, on every lane: "read". Probing on
+// 2026-10-22 shows the gate no longer compares tool descriptions or parameter
+// schemas (a bare {"name":"read","parameters":{"type":"object"}} passes), and
+// the shell/edit/glob/grep set is no longer mandatory. The gateway therefore
+// injects that one tool instead of shipping captured CLI definitions, which
+// went stale whenever the upstream changed them.
+
+// prepareAnonymousBody returns the body shaped for the free tier: forced to
+// stream (keeping Chat usage reporting on) and carrying the single "read" tool
+// the gate requires, alongside the original client tool name that was aliased
+// to "read" so the gateway can restore it in the downstream response.
 //
-// "shell" is the name OpenCode 2.x ships; the v1 client's "bash" spelling is
-// deliberately not injected on /inference because that gate validates the
-// definition of every tool it recognises, and a "bash" definition the gateway
-// synthesises does not match the one upstream expects. Since 2026-10-14 name
-// presence is not enough on /inference either: the upstream compares each
-// recognised tool's description and parameter schema against the official CLI's
-// definitions byte-for-byte (minimal stand-ins 403), which is why the genuine
-// definitions below are embedded. Tool order is irrelevant and extra client
-// tools are allowed.
-var v2CoreTools = []string{"shell", "edit", "glob", "grep", "read"}
-
-// opencodeToolsJSON holds the genuine OpenCode tool definitions (description
-// and JSON schema) captured from the official client. The /inference free-tier
-// gate checks the definition of every tool whose name it recognises, so a
-// synthesised stub — even one carrying the right name — is rejected with 403
-// FreeTierError. The gateway therefore ships the real definitions for the v2
-// lane and uses them both for the tools it injects and for any same-named tool
-// the downstream client declared.
-//
-//go:embed opencode_tools.json
-var opencodeToolsJSON []byte
-
-// opencodeToolDefinition is one entry of opencode_tools.json.
-type opencodeToolDefinition struct {
-	Description string         `json:"description"`
-	Parameters  map[string]any `json:"parameters"`
-}
-
-var (
-	opencodeToolsOnce sync.Once
-	opencodeTools     map[string]opencodeToolDefinition
-)
-
-// knownOpencodeTool returns the genuine definition for an OpenCode tool name.
-// The embedded JSON is decoded once; if it fails to decode, no tool is known.
-func knownOpencodeTool(name string) (opencodeToolDefinition, bool) {
-	opencodeToolsOnce.Do(func() {
-		definitions := map[string]opencodeToolDefinition{}
-		if err := json.Unmarshal(opencodeToolsJSON, &definitions); err != nil {
-			definitions = map[string]opencodeToolDefinition{}
-		}
-		opencodeTools = definitions
-	})
-	definition, ok := opencodeTools[name]
-	return definition, ok
-}
-
-// prepareAnonymousBody returns body normalized for the free tier alongside any
-// original client tool name that was aliased to "read" for the v1 gate. The
-// body is forced to stream (keeping Chat usage reporting on) and its tools are
-// shaped for the lane v1 selects; an unchanged body is returned as is.
-//
-// On the v1 gate (v1 == true), none of the v2 core tools are injected: if the
-// client declared a read-related tool (case-insensitive, e.g. "reAd",
-// "Read_file", "readFile"), it is renamed in-place to "read" while keeping its
-// original description and parameters, and its original name is returned so
-// the gateway can restore it in the downstream response; if no read-related
-// tool is present, a single deprecated "read" stub is injected.
-//
-// On a v2 gate (v1 == false), v2CoreTools with genuine CLI 2.x definitions are
-// ensured. System One payloads are decision requests, not agent traffic, so
-// they are forwarded verbatim, as is a body that is not a JSON object.
-func prepareAnonymousBody(body []byte, protocol wire.Protocol, v1 bool) ([]byte, string) {
+// System One payloads are decision requests, not agent traffic, so they are
+// forwarded verbatim, as is a body that is not a JSON object.
+func prepareAnonymousBody(body []byte, protocol wire.Protocol) ([]byte, string) {
 	if protocol == wire.SystemOne {
 		return body, ""
 	}
@@ -669,14 +616,8 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol, v1 bool) ([]byte,
 	if ensureAnonymousChatUsage(payload, protocol) {
 		changed = true
 	}
-	var alias string
-	if v1 {
-		var toolChanged bool
-		alias, toolChanged = ensureV1ReadTool(payload, protocol)
-		if toolChanged {
-			changed = true
-		}
-	} else if ensureV2Tools(payload, protocol) {
+	alias, toolChanged := ensureV1ReadTool(payload, protocol)
+	if toolChanged {
 		changed = true
 	}
 	if !changed {
@@ -890,51 +831,6 @@ func v1DeprecatedReadTool(protocol wire.Protocol) map[string]any {
 	}
 }
 
-// ensureV2Tools makes the tool list read as an OpenCode 2.x agent session on
-// a v2 gate: every recognised OpenCode tool carries its genuine CLI 2.x
-// definition and missing core tools are appended with genuine schemas;
-// unrecognised client tools are left untouched. It reports whether the payload
-// changed; a "tools" value that is not an array is left untouched.
-func ensureV2Tools(payload map[string]any, protocol wire.Protocol) bool {
-	raw, exists := payload["tools"]
-	if !exists {
-		payload["tools"] = v2Toolset(protocol, v2CoreTools)
-		return true
-	}
-	items, ok := raw.([]any)
-	if !ok {
-		return false
-	}
-	changed := false
-	present := make(map[string]bool, len(items))
-	for index, item := range items {
-		name := anonymousToolName(protocol, item)
-		if name == "" {
-			continue
-		}
-		present[name] = true
-		if _, known := knownOpencodeTool(name); known {
-			items[index] = v2Tool(protocol, name)
-			changed = true
-		}
-	}
-	missing := make([]string, 0, len(v2CoreTools))
-	for _, name := range v2CoreTools {
-		if !present[name] {
-			missing = append(missing, name)
-		}
-	}
-	if len(missing) > 0 {
-		items = append(items, v2Toolset(protocol, missing)...)
-		changed = true
-	}
-	if !changed {
-		return false
-	}
-	payload["tools"] = items
-	return true
-}
-
 // anonymousToolName returns the name of a tool definition in the wire shape
 // of protocol (function.name on Chat, name elsewhere), or "" when it has none.
 func anonymousToolName(protocol wire.Protocol, item any) string {
@@ -946,61 +842,6 @@ func anonymousToolName(protocol wire.Protocol, item any) string {
 		return jsonutil.StringAt(entry, "function", "name")
 	}
 	return jsonutil.StringAt(entry, "name")
-}
-
-// v2Toolset returns the wire-shaped genuine CLI 2.x definitions for the given
-// tool names on a v2 gate. A nil names selects every v2CoreTools entry.
-func v2Toolset(protocol wire.Protocol, names []string) []any {
-	if names == nil {
-		names = v2CoreTools
-	}
-	tools := make([]any, 0, len(names))
-	for _, name := range names {
-		if tool := v2Tool(protocol, name); tool != nil {
-			tools = append(tools, tool)
-		}
-	}
-	return tools
-}
-
-// v2Tool renders one tool in the shape the given protocol expects, using the
-// genuine OpenCode CLI 2.x definition whenever one is known and an "Agent tool
-// <name>" placeholder with an empty object schema otherwise. SystemOne
-// payloads never reach this path (prepareAnonymousBody forwards them
-// verbatim), so it falls back to the Responses/default shape.
-func v2Tool(protocol wire.Protocol, name string) map[string]any {
-	description := "Agent tool " + name
-	parameters := map[string]any{"type": "object", "properties": map[string]any{}}
-	if definition, ok := knownOpencodeTool(name); ok {
-		description = definition.Description
-		if definition.Parameters != nil {
-			parameters = definition.Parameters
-		}
-	}
-	switch protocol {
-	case wire.Chat:
-		return map[string]any{
-			"type": "function",
-			"function": map[string]any{
-				"name":        name,
-				"description": description,
-				"parameters":  parameters,
-			},
-		}
-	case wire.Anthropic:
-		return map[string]any{
-			"name":         name,
-			"description":  description,
-			"input_schema": parameters,
-		}
-	default:
-		return map[string]any{
-			"type":        "function",
-			"name":        name,
-			"description": description,
-			"parameters":  parameters,
-		}
-	}
 }
 
 // requestBodyDumpLimit caps how much of an outbound body is written to the log.
@@ -1055,12 +896,94 @@ func (g *Gateway) shapeKeyBody(body []byte, route models.Route, tier config.Tier
 	if !g.catalog.IsFreeModel(route.ID) {
 		return body, "", false
 	}
-	baseURL := g.cfg.Upstream.Zen
-	if tier == config.TierGo {
-		baseURL = g.cfg.Upstream.Go
-	}
-	shaped, alias := prepareAnonymousBody(body, route.ProtocolFor(tier), models.IsV1Upstream(baseURL))
+	shaped, alias := prepareAnonymousBody(body, route.ProtocolFor(tier))
+	shaped = g.alignEffort(route.ID, tier, route.ProtocolFor(tier), shaped)
 	return shaped, alias, !bytes.Equal(shaped, body)
+}
+
+// effortRanks orders the effort rungs the catalog publishes. A level outside
+// this table has no place on a ladder, so it is never coerced.
+var effortRanks = map[string]int{
+	"minimal": 0, "low": 1, "medium": 2, "high": 3, "xhigh": 4, "max": 5,
+}
+
+// coerceEffort returns the level of allowed nearest to current, preferring the
+// higher rung on a tie so a request for more reasoning is not silently served
+// with less. It reports whether the level actually changed; a level outside the
+// published ladder is left alone.
+func coerceEffort(current string, allowed []string) (string, bool) {
+	level, ok := effortRanks[strings.ToLower(strings.TrimSpace(current))]
+	if !ok {
+		return current, false
+	}
+	best, bestDistance := "", -1
+	for _, candidate := range allowed {
+		rank, ok := effortRanks[strings.ToLower(strings.TrimSpace(candidate))]
+		if !ok {
+			continue
+		}
+		distance := rank - level
+		if distance < 0 {
+			distance = -distance
+		}
+		if bestDistance < 0 || distance < bestDistance ||
+			(distance == bestDistance && rank > effortRanks[strings.ToLower(strings.TrimSpace(best))]) {
+			best, bestDistance = candidate, distance
+		}
+	}
+	if best == "" {
+		return current, false
+	}
+	return best, !strings.EqualFold(best, current)
+}
+
+// alignEffort rewrites the effort a prepared body carries onto the ladder the
+// model publishes in the catalog, so a downstream client asking for a rung the
+// model does not implement (Anthropic's "max" against a model that stops at
+// "xhigh", or "xhigh" against a free model that only offers low/high/max) does
+// not turn into an upstream 400. reasoning_options is authoritative: a model
+// without an effort ladder is left untouched, as is a level outside the table.
+// Only the protocols that carry a bare effort string are handled; Anthropic
+// states reasoning as a thinking budget instead.
+func (g *Gateway) alignEffort(model string, tier config.Tier, protocol wire.Protocol, body []byte) []byte {
+	if g.catalog == nil || len(body) == 0 {
+		return body
+	}
+	allowed := g.catalog.MetadataForTier(model, tier).ReasoningEfforts
+	if len(allowed) == 0 {
+		return body
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body
+	}
+	changed := false
+	switch protocol {
+	case wire.Chat:
+		if current, ok := payload["reasoning_effort"].(string); ok {
+			if level, moved := coerceEffort(current, allowed); moved {
+				payload["reasoning_effort"] = level
+				changed = true
+			}
+		}
+	case wire.Responses:
+		if reasoning, ok := payload["reasoning"].(map[string]any); ok {
+			if current, ok := reasoning["effort"].(string); ok {
+				if level, moved := coerceEffort(current, allowed); moved {
+					reasoning["effort"] = level
+					changed = true
+				}
+			}
+		}
+	}
+	if !changed {
+		return body
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return encoded
 }
 
 // doSelectedKeyUpstream sends exactly one attempt through the operator-selected
@@ -1100,7 +1023,7 @@ func (g *Gateway) doSelectedKeyUpstream(ctx context.Context, route models.Route,
 	}
 	keyID := config.KeyDisplayID(node.key)
 	setRequestCredential(ctx, override.Tier, keyID, "key", false, proxy)
-	req, err := upstreamRequest(ctx, baseURL, route.ProtocolFor(override.Tier), body, ids, node.key)
+	req, err := upstreamRequest(ctx, baseURL, route.ProtocolFor(override.Tier), body, ids, node.key, false)
 	if err != nil {
 		return nil, err, 0
 	}
@@ -1175,7 +1098,7 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 			httpx.DrainAndClose(lastResponse.Body)
 			lastResponse = nil
 		}
-		req, err := upstreamRequest(ctx, baseURL, route.Protocol, body, ids, node.key)
+		req, err := upstreamRequest(ctx, baseURL, route.Protocol, body, ids, node.key, false)
 		if err != nil {
 			return nil, err, attempts
 		}
@@ -1361,15 +1284,18 @@ func (g *Gateway) recordUpstreamAttempt(ctx context.Context, route models.Route,
 }
 
 // upstreamRequest builds the POST for one attempt: baseURL plus the protocol's
-// /v1/... route, carrying body. The header set follows the lane: setV1Headers
-// when models.IsV1Upstream(baseURL), setV2Headers otherwise. Anthropic
-// endpoints on a v2 lane gain beta=true, matching the 2.x client; the 1.x lane
-// keeps its shape. key is sent as x-api-key (with anthropic-version) on the
-// Anthropic protocol and as a Bearer token on every other one; the anonymous
-// lane passes anonymousZenKey.
-func upstreamRequest(ctx context.Context, baseURL string, protocol wire.Protocol, body []byte, ids identity.RequestIDs, key string) (*http.Request, error) {
-	endpoint := strings.TrimRight(baseURL, "/") + wire.Path(protocol)
-	if protocol == wire.Anthropic && !models.IsV1Upstream(baseURL) {
+// /v1/... route, carrying body. The header set follows the identity, not just
+// the host: the keyless lane always presents the OpenCode 1.19.3 client that
+// the 2026-10-22 capture shows being served on /inference, so setV1Headers
+// applies to every anonymous attempt; keyed lanes keep setV1Headers on the /zen
+// origin and setV2Headers elsewhere. Anthropic endpoints on a v2 identity gain
+// beta=true, matching the 2.x client; the 1.19.3 identity keeps its shape. key
+// is sent as x-api-key (with anthropic-version) on the Anthropic protocol and as
+// a Bearer token on every other one; the anonymous lane passes anonymousZenKey.
+func upstreamRequest(ctx context.Context, baseURL string, protocol wire.Protocol, body []byte, ids identity.RequestIDs, key string, anonymous bool) (*http.Request, error) {
+	v1 := anonymous || models.IsV1Upstream(baseURL)
+	endpoint := upstreamEndpoint(baseURL, protocol)
+	if protocol == wire.Anthropic && !v1 {
 		endpoint = withAnthropicBeta(endpoint)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
@@ -1377,7 +1303,7 @@ func upstreamRequest(ctx context.Context, baseURL string, protocol wire.Protocol
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if models.IsV1Upstream(baseURL) {
+	if v1 {
 		setV1Headers(req.Header, protocol, body, ids)
 	} else {
 		setV2Headers(req.Header, protocol, ids)
@@ -1392,6 +1318,24 @@ func upstreamRequest(ctx context.Context, baseURL string, protocol wire.Protocol
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	return req, nil
+}
+
+// upstreamEndpoint renders the POST target of one attempt. A base that names
+// the /inference origin gains the protocol family segment the catalog declares
+// for it (.../inference/openai/v1 for Chat and Responses, .../inference/
+// anthropic/v1 for Messages), which is the path the captured 1.19.3 client
+// calls. Every other base, including the /zen origin and any operator-supplied
+// URL that already carries a path, keeps the bare "<base>/v1/..." shape.
+func upstreamEndpoint(baseURL string, protocol wire.Protocol) string {
+	base := strings.TrimRight(baseURL, "/")
+	if strings.HasSuffix(strings.ToLower(base), "/inference") {
+		family := "openai"
+		if protocol == wire.Anthropic {
+			family = "anthropic"
+		}
+		base += "/" + family
+	}
+	return base + wire.Path(protocol)
 }
 
 // withAnthropicBeta marks an Anthropic endpoint as beta the way the OpenCode

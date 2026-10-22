@@ -40,22 +40,15 @@ func TestShapeKeyBodyFreeVsPaid(t *testing.T) {
 	if options["include_usage"] != true {
 		t.Fatalf("include_usage not forced: %v", payload["stream_options"])
 	}
+	// The gate needs exactly one tool name, "read"; no shell/edit/glob/grep set.
 	tools, _ := payload["tools"].([]any)
-	if len(tools) != len(v2CoreTools) {
-		t.Fatalf("expected %d tools injected, got %d", len(v2CoreTools), len(tools))
+	if len(tools) != 1 {
+		t.Fatalf("expected the single read tool, got %d tools", len(tools))
 	}
-	names := make(map[string]bool, len(tools))
-	for _, raw := range tools {
-		entry, _ := raw.(map[string]any)
-		fn, _ := entry["function"].(map[string]any)
-		if name, _ := fn["name"].(string); name != "" {
-			names[name] = true
-		}
-	}
-	for _, name := range v2CoreTools {
-		if !names[name] {
-			t.Fatalf("core tool %q missing from shaped body", name)
-		}
+	entry, _ := tools[0].(map[string]any)
+	fn, _ := entry["function"].(map[string]any)
+	if name, _ := fn["name"].(string); name != v1ReadTool {
+		t.Fatalf("injected tool = %q, want %q", name, v1ReadTool)
 	}
 
 	// Paid model: byte-identical passthrough.

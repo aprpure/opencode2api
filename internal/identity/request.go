@@ -78,12 +78,11 @@ func DeriveRequestIDs(r *http.Request, body map[string]any, scope string) Reques
 	}
 	projectSignal := jsonutil.FirstString(r.Header.Get("x-opencode-project"), jsonutil.StringAt(body, "metadata", "project_id"))
 	if projectSignal == "" {
-		// Without a client project every caller would otherwise share one
-		// constant upstream project.
-		projectSignal = "opencode2api:default-project"
-		if scope != "" {
-			projectSignal += ":" + scope
-		}
+		// The captured 1.19.3 client reports "global" when the session has no
+		// project of its own, and projectID passes that value through verbatim,
+		// so the gateway sends the same constant instead of a scoped hash. A
+		// caller that names a project still gets a scoped, hashed id.
+		projectSignal = "global"
 	}
 	parentSession := jsonutil.FirstString(
 		r.Header.Get("x-parent-session-id"),

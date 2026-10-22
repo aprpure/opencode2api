@@ -53,10 +53,9 @@ func (g *Gateway) resolvedEffort(model string, tier config.Tier, protocol wire.P
 // probePayload builds the probe body for model: a System One arithmetic
 // question, or a minimal streaming "Reply with OK." Chat prompt converted to
 // protocol, with effort forced when non-empty and the result shaped for the
-// free tier by prepareAnonymousBody. v1 reports whether the probe targets the
-// v1 lane (models.IsV1Upstream), which selects the single "read" tool shaping
-// instead of the v2 toolset.
-func probePayload(model string, protocol wire.Protocol, effort string, v1 bool) ([]byte, error) {
+// free tier by prepareAnonymousBody (which supplies the single required "read"
+// tool on every lane).
+func probePayload(model string, protocol wire.Protocol, effort string) ([]byte, error) {
 	if protocol == wire.SystemOne {
 		// TypeSafe's native boolean type is "noul", not JSON Schema boolean.
 		return json.Marshal(map[string]any{"model": model, "state": "1 + 1 = 2", "questions": map[string]any{
@@ -75,7 +74,7 @@ func probePayload(model string, protocol wire.Protocol, effort string, v1 bool) 
 	if err != nil {
 		return nil, err
 	}
-	shaped, _ := prepareAnonymousBody(b, protocol, v1)
+	shaped, _ := prepareAnonymousBody(b, protocol)
 	return shaped, nil
 }
 
@@ -194,14 +193,14 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 // model_unavailable, probe_timeout, ...) and whether the upstream rejected the
 // reasoning effort.
 func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, baseURL, key, model string, protocol wire.Protocol, ids identity.RequestIDs, effort string) probeResult {
-	b, err := probePayload(model, protocol, effort, models.IsV1Upstream(baseURL))
+	b, err := probePayload(model, protocol, effort)
 	if err != nil {
 		return probeResult{reason: "request_conversion_error"}
 	}
 	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
 	ids.Request = identity.RandomID("req", 16)
-	req, err := upstreamRequest(ctx, baseURL, protocol, b, ids, key)
+	req, err := upstreamRequest(ctx, baseURL, protocol, b, ids, key, key == anonymousZenKey)
 	if err != nil {
 		return probeResult{reason: "request_creation_error"}
 	}
