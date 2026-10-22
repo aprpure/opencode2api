@@ -280,13 +280,27 @@ func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, base
 
 // isModelUnavailable reports whether a 400, 404, 410 or 422 error body says
 // the model itself is unknown, retired or no longer available, as opposed to
-// a transient or credential failure.
+// a transient or credential failure. A 403 counts only when it carries the
+// regional gate's RegionError: every other 403 is a credential or egress
+// problem and says nothing about the model. A model reported unavailable is
+// disabled by the probe record and rechecked daily instead of hourly, so the
+// gateway stops sending traffic it knows will fail.
 func isModelUnavailable(status int, body string) bool {
-	if status != 400 && status != 404 && status != 410 && status != 422 {
+	text := strings.ToLower(body)
+	switch status {
+	case 400, 404, 410, 422:
+	case 403:
+		if !strings.Contains(text, "regionerror") {
+			return false
+		}
+	default:
 		return false
 	}
-	text := strings.ToLower(body)
-	for _, marker := range []string{"model_not_found", "model_not_available", "model_retired", "model_deprecated", "unknown model", "model does not exist", "model has been retired", "model is no longer available"} {
+	for _, marker := range []string{
+		"model_not_found", "model_not_available", "model_retired", "model_deprecated",
+		"modeldeprecated", "unknown model", "model does not exist", "model has been retired",
+		"model is no longer available", "model is unavailable", "regionerror",
+	} {
 		if strings.Contains(text, marker) {
 			return true
 		}
